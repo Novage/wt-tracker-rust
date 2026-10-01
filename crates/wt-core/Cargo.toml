@@ -1,0 +1,16 @@
+[package]
+name = "wt-core"
+version = "0.1.0"
+description = "Sans-IO WebTorrent tracker core: peers, swarms, offer routing"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fastrand = "2.5"
+foldhash = "0.2"
+hashbrown = { version = "0.17", default-features = false, features = ["inline-more"] }
+slab = "0.4"
+smallvec = { version = "1.15", features = ["union"] }
+
+[dev-dependencies]
+proptest = "1.11"

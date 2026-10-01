@@ -1,0 +1,11 @@
+[package]
+name = "wt-difftest"
+version = "0.1.0"
+description = "Runs operation traces through wt-core for differential testing against the JS tracker"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+wt-core = { path = "../wt-core" }
+serde_json = "1.0"

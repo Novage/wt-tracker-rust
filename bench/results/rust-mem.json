@@ -1,0 +1,25 @@
+{
+  "memory": [
+    {
+      "bytes": 91482648,
+      "bytes_per_membership": 152.47108,
+      "memberships": 600000,
+      "name": "multi_peer_join",
+      "peers": 300000,
+      "rss_bytes": 55525376,
+      "rss_bytes_per_membership": 92.54229333333332,
+      "swarms": 10000
+    },
+    {
+      "bytes": 233873432,
+      "bytes_per_membership": 233.873432,
+      "memberships": 1000000,
+      "name": "join_many_swarms",
+      "peers": 1000000,
+      "rss_bytes": 282099712,
+      "rss_bytes_per_membership": 282.099712,
+      "swarms": 100000
+    }
+  ],
+  "runtime": "rust"
+}
