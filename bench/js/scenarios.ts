@@ -1,5 +1,6 @@
 // Scenario shapes shared by bench.ts and scaling-worker.ts. Mirrors crates/wt-bench/src/lib.rs.
 
+import fs from "node:fs";
 import path from "node:path";
 
 // The JS tracker under test; override with WT_TRACKER_DIR.
@@ -55,23 +56,31 @@ export function makeConns(count: number): Conn[] {
   return Array.from({ length: count }, () => ({}));
 }
 
-export const counter = { replies: 0, offers: 0, answers: 0, removed: 0 };
+export const counter = { replies: 0, offers: 0, answers: 0, removed: 0, bytes: 0 };
 
 export function resetCounter() {
   counter.replies = 0;
   counter.offers = 0;
   counter.answers = 0;
   counter.removed = 0;
+  counter.bytes = 0;
 }
 
-function sendMessage(json: Record<string, unknown>) {
+function countMessage(json: Record<string, unknown>) {
   if (json.offer !== undefined) counter.offers++;
   else if (json.answer !== undefined) counter.answers++;
   else if (json.interval !== undefined) counter.replies++;
 }
 
-export function newTracker() {
-  const tracker = new FastTracker<Conn>({}, sendMessage);
+/** Like uws-tracker's sendMessage: the message is serialized (bytes counted, all ASCII). */
+function sendSerialized(json: Record<string, unknown>) {
+  countMessage(json);
+  counter.bytes += JSON.stringify(json).length;
+}
+
+/** `serialize`: run JSON.stringify on every message, as the real server does. */
+export function newTracker(serialize = false) {
+  const tracker = new FastTracker<Conn>({}, serialize ? sendSerialized : countMessage);
   tracker.onRemovePeer = () => {
     counter.removed++;
   };
@@ -148,3 +157,36 @@ export function runAnnounceList(
     );
   }
 }
+
+// ---- protocol scenarios (frames are byte-identical to crates/wt-bench) ----
+
+export const PROTO_FRAMES = 1000;
+export const PROTO_MSGS = 20_000;
+const SDP_FIXTURE = fs.readFileSync(path.join(import.meta.dirname, "../fixtures/offer.sdp"), "utf8");
+
+export function sdpJson(n: number): string {
+  return JSON.stringify(SDP_FIXTURE.replace("{session}", String(n).padStart(19, "0")));
+}
+
+export function announceFrame(infoHash: string, peerId: string, n: number): string {
+  const offers = Array.from(
+    { length: OFFERS_PER_ANNOUNCE },
+    (_, k) => `{"offer":{"type":"offer","sdp":${sdpJson(n * OFFERS_PER_ANNOUNCE + k)}},"offer_id":"o${String(n).padStart(9, "0")}${String(k).padStart(10, "0")}"}`,
+  );
+  return `{"action":"announce","info_hash":"${infoHash}","peer_id":"${peerId}","numwant":${NUMWANT},"uploaded":0,"downloaded":0,"offers":[${offers.join(",")}]}`;
+}
+
+export function answerFrame(infoHash: string, peerId: string, toPeerId: string, n: number): string {
+  return `{"action":"announce","info_hash":"${infoHash}","peer_id":"${peerId}","to_peer_id":"${toPeerId}","answer":{"type":"answer","sdp":${sdpJson(n)}},"offer_id":"o${String(n).padStart(19, "0")}"}`;
+}
+
+/** PROTO_FRAMES memberships spread over multi_peer_join: flat [conn, peer, swarm, ...]. */
+export function protoMemberships(): Int32Array {
+  const all = mpMemberships();
+  const step = MP_MEMBERSHIPS / PROTO_FRAMES;
+  const out = new Int32Array(PROTO_FRAMES * 3);
+  for (let n = 0; n < PROTO_FRAMES; n++) out.set(all.subarray(n * step * 3, n * step * 3 + 3), n * 3);
+  return out;
+}
+
+export const answerTarget = (n: number) => (n * 2_654_435_761) % MP_PEERS;

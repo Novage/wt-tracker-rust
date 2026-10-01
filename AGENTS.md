@@ -8,6 +8,7 @@ Rust port of `../wt-tracker`, a WebTorrent tracker in Node.js + uWebSockets.js. 
 multi-core operation, zero-copy message handling and fast WebSockets.
 
 - `crates/wt-core`: sans-IO tracker math (`Shard`): peers, swarms, offer routing.
+- `crates/wt-proto`: zero-copy wire protocol (JSON frames ↔ `wt-core`), byte-compatible with JS.
 - `crates/wt-bench`: Rust benchmarks. `bench/js`: identical JS benchmarks against `../wt-tracker`.
 - `docs/SPEC.md`: **the specification and source of truth for behaviour.**
 - `.agents/skills/`: shared agent skills (`SKILL.md` format). `.claude/skills` is a symlink to
@@ -26,6 +27,7 @@ behaviour.
    | You changed | Update |
    |---|---|
    | request handling, offer selection, removal/expiry rules, outbox events | §5 |
+   | wire protocol: parsing rules, message layouts, errors, backends (`wt-proto`) | §7 |
    | `Settings` fields or defaults | §6 |
    | data structures, `Key`, indices | §3, and §4 plus `check_invariants()` if invariants change |
    | behaviour that now differs from (or matches) the JS `FastTracker` | §8 |
@@ -41,8 +43,8 @@ behaviour.
 
 ## Performance tables
 
-When a change can affect performance (anything in `crates/wt-core/src`, `crates/wt-bench`,
-`bench/js`), regenerate §11:
+When a change can affect performance (anything in `crates/wt-core/src`, `crates/wt-proto/src`,
+`crates/wt-bench`, `bench/js`), regenerate §11:
 
 ```bash
 ./bench/run.sh

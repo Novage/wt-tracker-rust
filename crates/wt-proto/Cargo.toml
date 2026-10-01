@@ -1,0 +1,21 @@
+[package]
+name = "wt-proto"
+version = "0.1.0"
+description = "Zero-copy WebTorrent tracker wire protocol: JSON frames <-> wt-core requests/events"
+edition.workspace = true
+license.workspace = true
+
+[features]
+# SIMD JSON parsing backend (sonic-rs); the serde_json backend is always available.
+sonic = ["dep:sonic-rs"]
+
+[dependencies]
+wt-core = { path = "../wt-core" }
+itoa = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+smallvec = { version = "1.15", features = ["union"] }
+sonic-rs = { version = "0.5", optional = true }
+
+[dev-dependencies]
+proptest = "1.11"

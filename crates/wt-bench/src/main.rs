@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use wt_bench::*;
-use wt_core::{AnnounceEvent, OfferSelection, Settings, Shard};
+use wt_core::{AnnounceEvent, ConnId, OfferSelection, Outbox, Settings, Shard};
+use wt_proto::{Backend, Encoder, Message, SerdeJson, Sonic};
 
 const WARMUP: usize = 2;
 const RUNS: usize = 5;
@@ -47,6 +48,7 @@ fn bench(name: &str, ops: usize, mut run: impl FnMut() -> (Duration, Counter)) -
             "offers": counter.offers,
             "answers": counter.answers,
             "removed": counter.removed,
+            "bytes": counter.bytes,
         },
     })
 }
@@ -241,6 +243,8 @@ fn main() {
         )
     }));
 
+    proto_scenarios(&ids, &mut scenarios);
+
     let mut scaling_results = scaling(&ids, Scaling::Strong);
     scaling_results.extend(scaling(&ids, Scaling::Weak));
 
@@ -255,4 +259,136 @@ fn main() {
         "scaling": scaling_results,
     });
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
+}
+
+fn proto_scenarios(ids: &Ids, scenarios: &mut Vec<Value>) {
+    let members = proto_memberships();
+    let announces: Vec<(u64, Vec<u8>)> = members
+        .iter()
+        .enumerate()
+        .map(|(n, &(c, p, s))| {
+            (
+                c as u64,
+                announce_frame(&ids.swarms[s], &ids.peers[p], n).into_bytes(),
+            )
+        })
+        .collect();
+    let answers: Vec<(u64, Vec<u8>)> = members
+        .iter()
+        .enumerate()
+        .map(|(n, &(c, p, s))| {
+            let frame = answer_frame(
+                &ids.swarms[s],
+                &ids.peers[p],
+                &ids.peers[answer_target(n)],
+                n,
+            );
+            (c as u64, frame.into_bytes())
+        })
+        .collect();
+
+    fn parse_bench<B: Backend>(name: &str, frames: &[(u64, Vec<u8>)]) -> Value {
+        bench(name, PROTO_MSGS, || {
+            let mut out = Counter::default();
+            let start = Instant::now();
+            for i in 0..PROTO_MSGS {
+                let frame = &frames[i % frames.len()].1;
+                std::hint::black_box(B::parse(frame).unwrap());
+                out.bytes += frame.len() as u64;
+            }
+            (start.elapsed(), out)
+        })
+    }
+    scenarios.push(parse_bench::<SerdeJson>(
+        "proto_parse_announce_serde_json",
+        &announces,
+    ));
+    scenarios.push(parse_bench::<Sonic>(
+        "proto_parse_announce_sonic",
+        &announces,
+    ));
+
+    // Encoding only: reply + 10 offers per announce, from pre-parsed frames.
+    let parsed: Vec<Message<'_>> = announces
+        .iter()
+        .map(|(_, f)| SerdeJson::parse(f).unwrap())
+        .collect();
+    scenarios.push(bench("proto_encode_announce", PROTO_MSGS, || {
+        let mut enc = Encoder::new();
+        let mut out = Counter::default();
+        let start = Instant::now();
+        for i in 0..PROTO_MSGS {
+            let Message::Announce {
+                info_hash,
+                peer_id,
+                offers: Some(offers),
+                ..
+            } = &parsed[i % parsed.len()]
+            else {
+                unreachable!()
+            };
+            enc.clear();
+            enc.announce_reply(ConnId(1), info_hash, 20, 1, 59);
+            for offer in offers {
+                enc.offer(ConnId(2), peer_id, info_hash, offer);
+            }
+            out.replies += 1;
+            out.offers += offers.len() as u64;
+            out.bytes += enc.bytes() as u64;
+        }
+        (start.elapsed(), out)
+    }));
+
+    fn pipeline<B: Backend>(
+        name: &str,
+        ids: &Ids,
+        frames: &[(u64, Vec<u8>)],
+        answers: bool,
+    ) -> Value {
+        let mut shard = new_shard();
+        run_multi_peer_join(&mut shard, &mut Counter::default(), ids, 0);
+        bench(name, PROTO_MSGS, || {
+            let mut enc = Encoder::new();
+            let mut out = Counter::default();
+            let start = Instant::now();
+            for i in 0..PROTO_MSGS {
+                let (conn, frame) = &frames[i % frames.len()];
+                enc.clear();
+                wt_proto::handle_with::<B>(&mut shard, 0, ConnId(*conn), frame, &mut enc).unwrap();
+                let messages = enc.messages().len() as u64;
+                if answers {
+                    out.answers += messages;
+                } else {
+                    out.replies += 1;
+                    out.offers += messages - 1;
+                }
+                out.bytes += enc.bytes() as u64;
+            }
+            (start.elapsed(), out)
+        })
+    }
+    scenarios.push(pipeline::<SerdeJson>(
+        "pipeline_reannounce_serde_json",
+        ids,
+        &announces,
+        false,
+    ));
+    scenarios.push(pipeline::<Sonic>(
+        "pipeline_reannounce_sonic",
+        ids,
+        &announces,
+        false,
+    ));
+    scenarios.push(pipeline::<SerdeJson>(
+        "pipeline_answer_serde_json",
+        ids,
+        &answers,
+        true,
+    ));
+    scenarios.push(pipeline::<Sonic>(
+        "pipeline_answer_sonic",
+        ids,
+        &answers,
+        true,
+    ));
 }

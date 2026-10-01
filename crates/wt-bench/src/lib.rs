@@ -29,6 +29,8 @@ pub struct Counter {
     pub offers: u64,
     pub answers: u64,
     pub removed: u64,
+    /// Protocol scenarios: bytes parsed (parse) or sent (encode, pipeline).
+    pub bytes: u64,
 }
 
 impl Outbox<Offer> for Counter {
@@ -327,3 +329,67 @@ pub fn refresh_even_peers(shard: &mut Shard, out: &mut Counter, ids: &Ids) {
 
 /// #8: one sweep at t=45: odd peers (idle 45s > 40s) are removed.
 pub const EXPIRE_NOW: u32 = 45;
+
+// ---- protocol scenarios (frames are byte-identical to bench/js) ----
+
+/// Realistic WebRTC data-channel offer (CRLF lines); `{session}` varies per frame.
+pub const SDP_FIXTURE: &str = include_str!("../../../bench/fixtures/offer.sdp");
+/// Distinct frames per protocol scenario, cycled through.
+pub const PROTO_FRAMES: usize = 1000;
+/// Messages per protocol scenario run.
+pub const PROTO_MSGS: usize = 20_000;
+
+pub fn sdp_json(n: usize) -> String {
+    serde_json::to_string(&SDP_FIXTURE.replace("{session}", &format!("{n:019}"))).unwrap()
+}
+
+fn id_str(id: &[u8; 20]) -> &str {
+    std::str::from_utf8(id).unwrap()
+}
+
+/// Re-announce of a member of `multi_peer_join` with 10 offers.
+pub fn announce_frame(info_hash: &[u8; 20], peer_id: &[u8; 20], n: usize) -> String {
+    let offers: Vec<String> = (0..OFFERS_PER_ANNOUNCE)
+        .map(|k| {
+            format!(
+                r#"{{"offer":{{"type":"offer","sdp":{}}},"offer_id":"o{:09}{k:010}"}}"#,
+                sdp_json(n * OFFERS_PER_ANNOUNCE + k),
+                n
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"action":"announce","info_hash":"{}","peer_id":"{}","numwant":{NUMWANT},"uploaded":0,"downloaded":0,"offers":[{}]}}"#,
+        id_str(info_hash),
+        id_str(peer_id),
+        offers.join(",")
+    )
+}
+
+pub fn answer_frame(
+    info_hash: &[u8; 20],
+    peer_id: &[u8; 20],
+    to_peer_id: &[u8; 20],
+    n: usize,
+) -> String {
+    format!(
+        r#"{{"action":"announce","info_hash":"{}","peer_id":"{}","to_peer_id":"{}","answer":{{"type":"answer","sdp":{}}},"offer_id":"o{n:019}"}}"#,
+        id_str(info_hash),
+        id_str(peer_id),
+        id_str(to_peer_id),
+        sdp_json(n)
+    )
+}
+
+/// `PROTO_FRAMES` memberships spread over `multi_peer_join`: `(conn, peer, swarm)`.
+pub fn proto_memberships() -> Vec<(usize, usize, usize)> {
+    mp_memberships()
+        .step_by(MP_MEMBERSHIPS / PROTO_FRAMES)
+        .take(PROTO_FRAMES)
+        .collect()
+}
+
+/// Answer target of frame `n`: a pseudo-random known peer.
+pub fn answer_target(n: usize) -> usize {
+    (n * 2_654_435_761) % MP_PEERS
+}

@@ -2,6 +2,7 @@
 // Run: node --expose-gc bench/js/bench.ts > bench/results/js.json
 
 import os from "node:os";
+import { StringDecoder } from "node:string_decoder";
 import { Worker } from "node:worker_threads";
 import {
   ANSWERS,
@@ -11,7 +12,13 @@ import {
   MP_MEMBERSHIPS,
   MP_PEERS,
   ONE_SWARM_PEERS,
+  PROTO_FRAMES,
+  PROTO_MSGS,
   announce,
+  announceFrame,
+  answerFrame,
+  answerTarget,
+  protoMemberships,
   counter,
   makeConns,
   makeIds,
@@ -280,6 +287,83 @@ scenarios.push(bench("multi_peer_join", MP_MEMBERSHIPS, () => timed(() => {}, mp
 scenarios.push(bench("stop_all", MP_MEMBERSHIPS, () => timed(mpJoin, stopAll)));
 scenarios.push(bench("disconnect_all", MP_CONNS, () => timed(mpJoin, disconnectAll)));
 scenarios.push(bench("expire_sweep", MP_MEMBERSHIPS, expireSweep));
+
+// ---- protocol scenarios ----
+{
+  const members = protoMemberships();
+  const announces: [number, Buffer][] = [];
+  const answers: [number, Buffer][] = [];
+  for (let n = 0; n < PROTO_FRAMES; n++) {
+    const [c, p, s] = [members[n * 3], members[n * 3 + 1], members[n * 3 + 2]];
+    announces.push([c, Buffer.from(announceFrame(ids.swarms[s], ids.peers[p], n))]);
+    answers.push([c, Buffer.from(answerFrame(ids.swarms[s], ids.peers[p], ids.peers[answerTarget(n)], n))]);
+  }
+  // As uws-tracker.onMessage: StringDecoder over the received bytes, then JSON.parse.
+  const decoder = new StringDecoder();
+  const parse = (frame: Buffer) => JSON.parse(decoder.end(frame)) as Record<string, unknown>;
+
+  scenarios.push(
+    bench("proto_parse_announce", PROTO_MSGS, () => {
+      resetCounter();
+      const start = nowNs();
+      for (let i = 0; i < PROTO_MSGS; i++) {
+        const frame = announces[i % PROTO_FRAMES][1];
+        parse(frame);
+        counter.bytes += frame.length;
+      }
+      return nowNs() - start;
+    }),
+  );
+
+  // Encoding only: the same reused message objects as FastTracker, then JSON.stringify.
+  const parsed = announces.map(([, f]) => parse(f));
+  const reply = { action: "announce", interval: 0, info_hash: "", complete: 0, incomplete: 0 };
+  const offerMsg = { action: "announce", info_hash: "", offer_id: undefined as unknown, peer_id: "", offer: { type: "offer", sdp: undefined as unknown } };
+  scenarios.push(
+    bench("proto_encode_announce", PROTO_MSGS, () => {
+      resetCounter();
+      const start = nowNs();
+      for (let i = 0; i < PROTO_MSGS; i++) {
+        const m = parsed[i % PROTO_FRAMES];
+        reply.interval = 20;
+        reply.info_hash = m.info_hash as string;
+        reply.complete = 1;
+        reply.incomplete = 59;
+        counter.bytes += JSON.stringify(reply).length;
+        counter.replies++;
+        for (const item of m.offers as { offer: { sdp: unknown }; offer_id: unknown }[]) {
+          offerMsg.info_hash = m.info_hash as string;
+          offerMsg.offer_id = item.offer_id;
+          offerMsg.peer_id = m.peer_id as string;
+          offerMsg.offer.sdp = item.offer.sdp;
+          counter.bytes += JSON.stringify(offerMsg).length;
+          counter.offers++;
+        }
+      }
+      return nowNs() - start;
+    }),
+  );
+
+  const pipeline = (name: string, frames: [number, Buffer][]) => {
+    const tracker = newTracker(true);
+    mpJoin(tracker);
+    gc();
+    scenarios.push(
+      bench(name, PROTO_MSGS, () => {
+        resetCounter();
+        const start = nowNs();
+        for (let i = 0; i < PROTO_MSGS; i++) {
+          const [c, frame] = frames[i % PROTO_FRAMES];
+          tracker.processMessage(parse(frame), ids.conns[c]);
+        }
+        return nowNs() - start;
+      }),
+    );
+    tracker.dispose();
+  };
+  pipeline("pipeline_reannounce", announces);
+  pipeline("pipeline_answer", answers);
+}
 
 const scalingResults = [...(await scaling("strong")), ...(await scaling("weak"))];
 

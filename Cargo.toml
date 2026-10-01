@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/wt-core", "crates/wt-bench", "crates/wt-difftest"]
+members = ["crates/wt-core", "crates/wt-proto", "crates/wt-bench", "crates/wt-difftest"]
 
 [workspace.package]
 edition = "2024"

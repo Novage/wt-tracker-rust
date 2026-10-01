@@ -7,4 +7,5 @@ publish = false
 
 [dependencies]
 wt-core = { path = "../wt-core" }
+wt-proto = { path = "../wt-proto", features = ["sonic"] }
 serde_json = "1.0"
