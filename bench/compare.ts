@@ -69,6 +69,33 @@ for (const t of threadCounts) {
   );
 }
 
+// Load test (loadtest/run.sh), if it has been run.
+const loadFile = path.join(dir, "load.json");
+if (fs.existsSync(loadFile)) {
+  type Run = {
+    label: string; conns: number; connected: number; failed: number; closed_early: number;
+    per_second: { sent: number; received: number };
+    rtt_ms: { p50: number; p99: number };
+    server: { cpu_cores: number; cpu_us_per_message: number; rss_bytes: number; rss_bytes_per_conn: number } | null;
+  };
+  const load = JSON.parse(fs.readFileSync(loadFile, "utf8")) as { env: Record<string, unknown>; smoke_same: boolean; runs: Run[] };
+  const r0 = load.runs[0] as unknown as { swarms: number; offers: number; duration_s: number };
+  lines.push("", "### Load test (end to end, `loadtest/run.sh`)", "");
+  lines.push(`- ${JSON.stringify(load.env)}; client and server on the same machine.`);
+  lines.push(`- ${r0?.swarms} swarms, ${r0?.offers} offers per announce (1.3 KB SDP), every offer answered, ${Math.round(r0?.duration_s ?? 0)} s steady phase. JS with \`compression: 0\` (Rust does not negotiate permessage-deflate). \`js-workers\` = JS multi-worker tracker, \`rust-1\` / \`rust-n\` = 1 / all-core workers.`);
+  lines.push(`- Wire smoke check (same messages from JS and Rust): **${load.smoke_same ? "yes" : "no"}**.`, "");
+  lines.push("| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB | RSS KiB / conn | RTT p50 / p99 ms |");
+  lines.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+  const order = (l: string) => (l.startsWith("light") ? 0 : 1);
+  for (const r of [...load.runs].sort((a, b) => order(a.label) - order(b.label) || (a.label < b.label ? -1 : 1))) {
+    const s = r.server;
+    const interval = (r as unknown as { interval_s: number }).interval_s;
+    lines.push(
+      `| ${r.label} | ${r.conns} (${r.connected}) | ${interval} s | ${r.failed + r.closed_early} | ${Math.round(r.per_second.sent + r.per_second.received).toLocaleString("en-US")} | ${s ? f2(s.cpu_cores) : "?"} | ${s ? f1(s.cpu_us_per_message) : "?"} | ${s ? f1(s.rss_bytes / 2 ** 20) : "?"} | ${s ? f1(s.rss_bytes_per_conn / 1024) : "?"} | ${f2(r.rtt_ms.p50)} / ${f2(r.rtt_ms.p99)} |`,
+    );
+  }
+}
+
 const tables = lines.join("\n");
 const specPath = path.join(import.meta.dirname, "../docs/SPEC.md");
 const BEGIN = "<!-- perf-tables:begin -->";

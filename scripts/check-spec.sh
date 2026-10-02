@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 
 base="${1:-main}"
 spec="docs/SPEC.md"
-code_pattern='^(crates/|bench/js/|bench/compare\.ts|bench/run\.sh|difftest/|Cargo\.toml)'
+code_pattern='^(crates/|bench/js/|bench/compare\.ts|bench/run\.sh|difftest/|loadtest/|Cargo\.toml)'
 
 changed=$(
   {

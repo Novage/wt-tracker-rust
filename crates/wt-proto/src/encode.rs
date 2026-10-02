@@ -1,6 +1,7 @@
 //! [`Outbox`] → JSON messages, in exactly the layout the JS tracker produces with
 //! `JSON.stringify` of its message objects.
 
+use bytes::Bytes;
 use wt_core::{ConnId, Key, Outbox};
 
 use crate::Payload;
@@ -11,6 +12,30 @@ struct OutMessage {
     to: ConnId,
     start: u32,
     end: u32,
+}
+
+/// Messages taken out of an [`Encoder`]: one buffer, messages as slices of it.
+#[derive(Debug, Default)]
+pub struct Batch {
+    bytes: Bytes,
+    messages: Vec<OutMessage>,
+}
+
+impl Batch {
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    /// `(receiver, message)` in emission order; each message shares the batch buffer.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (ConnId, Bytes)> + '_ {
+        self.messages
+            .iter()
+            .map(|m| (m.to, self.bytes.slice(m.start as usize..m.end as usize)))
+    }
 }
 
 struct OpenScrape {
@@ -58,6 +83,19 @@ impl Encoder {
     /// Total bytes of all messages.
     pub fn bytes(&self) -> usize {
         self.buf.len()
+    }
+
+    /// Moves the messages out as one shared buffer (no copy of message bytes) and clears the
+    /// encoder. Costs one buffer allocation per batch instead of one per message.
+    pub fn take(&mut self) -> Batch {
+        let capacity = self.buf.capacity();
+        let buf = std::mem::replace(&mut self.buf, Vec::with_capacity(capacity));
+        let messages = std::mem::take(&mut self.messages);
+        self.clear();
+        Batch {
+            bytes: Bytes::from(buf),
+            messages,
+        }
     }
 
     #[inline]

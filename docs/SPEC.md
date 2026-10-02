@@ -8,7 +8,8 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 | Tracker math (`crates/wt-core`) | implemented |
 | Benchmarks vs JS (`crates/wt-bench`, `bench/`) | implemented |
 | Protocol layer (`crates/wt-proto`, JSON ↔ `Request`) | implemented |
-| Server (WebSocket, TLS, sharding across cores) | planned |
+| Server (`crates/wt-server`: WebSocket, TLS, sharding across cores) | implemented (prototype) |
+| Load generator (`crates/wt-loadgen`, `loadtest/run.sh`) | implemented |
 
 ---
 
@@ -28,14 +29,16 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 - **Payload-agnostic:** `Request<'a, O>` and `Outbox<O>` are generic over the offer/answer payload
   `O`. The core never inspects it, only passes references through. The protocol layer will use
   `Bytes` slices of the received frame, so SDPs are never copied or re-escaped.
-- **Sharding (planned):** a server runs N shards, routing each request by
-  `hash(info_hash) % N`. Every request carries `info_hash`, so answers route without a global
-  peer table.
+- **Sharding:** the server runs N shards (one per worker), routing each request by
+  `hash(info_hash) % N` (§13.3). Every request carries `info_hash`, so answers route without a
+  global peer table.
 
 | Crate / dir | Purpose |
 |---|---|
 | `crates/wt-core` | `Shard`, `Key`, `Request`, `Outbox`, `Settings` |
 | `crates/wt-proto` | wire protocol: `handle`, parser backends, `Encoder` (§7) |
+| `crates/wt-server` | the server, binary `wt-tracker` (§13) |
+| `crates/wt-loadgen`, `loadtest/run.sh` | load generator, wire smoke check, JS vs Rust load test (§14) |
 | `crates/wt-core/tests` | ported JS tests, behaviour tests, model-based proptest |
 | `crates/wt-bench` | `wt-bench` (timing + scaling), `wt-bench-mem` (memory) |
 | `crates/wt-difftest`, `difftest/run.ts` | wire-level differential test: same random frame traces through the JS tracker and Rust `wt-proto` + `Shard` |
@@ -261,8 +264,14 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 
 - Ids are unescaped directly into the inline `Key`; offers are kept in `SmallVec<[Payload; 20]>`;
   only scrape hashes with escapes allocate (`Cow`).
+- `handle_with::<B>` = `B::parse` + `apply(shard, now, conn, &Message, out)`. `Message::route_info_hash()`
+  gives the `info_hash` that picks the shard (`None` for scrapes, unmatchable stops, answers
+  without a usable string `info_hash`).
+- `OwnedMessage::new(frame: Bytes, &message)` makes a parsed message `Send` without copying (the
+  frame plus offsets); `.message()` gives it back.
 - `Encoder`: one byte buffer plus a message index. `messages()` yields `(ConnId, &[u8])` in emission
-  order, `removed()` the `peer_removed` events, `bytes()` the total size; `clear()` keeps capacity.
+  order, `removed()` the `peer_removed` events, `bytes()` the total size; `clear()` keeps capacity;
+  `take()` moves all messages out as a `Batch` (one `Bytes` buffer, each message a slice of it).
   Integers via `itoa`.
 
 ## 8. Differences from the JS `FastTracker`
@@ -281,6 +290,11 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | `to_peer_id` key spelled with escapes | removed | `BadField("to_peer_id")` | never produced by `JSON.stringify` |
 | Integer-like member names (`"1"`) | reordered first when re-serialized | order preserved | JS object key order quirk |
 | Frame `null` | **uncaught `TypeError`** in the message handler (`null.action`) — a crash path | `NotAnObject` → close | JS bug |
+| permessage-deflate (`compression` > 0) | negotiated by uWebSockets | not negotiated (warning at startup) | not supported by fastwebsockets |
+| Answer without a string `info_hash`, several workers | single tracker: delivered; multi-worker: error | 1 worker: delivered; > 1: `BadField("info_hash")` → close | cannot be routed to a shard |
+| Answer target only in a swarm of another shard | delivered (one global peer table) | `UnknownPeer` → close | per-shard peer tables; real answers target a member of the same swarm |
+| `/stats.json` `memory` | `process.memoryUsage()` | `{ "rss": bytes }`; extra `workers`, `droppedMessages` | |
+| Slow receivers | uWS buffers up to its backpressure limit | messages beyond `maxBackpressure` (1 MiB) per connection are dropped | bounded memory |
 | Peer identity | global per tracker (per worker in multi-worker) | per shard | sharding |
 | Stop from another connection | allowed | allowed (parity) | hardening is planned (§12) |
 | Answer target not in the same swarm | allowed | allowed (parity) | hardening is planned (§12) |
@@ -328,6 +342,15 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
     §7.2 answer routing and body (the frame minus `to_peer_id`) or error; §5.5 scrape files;
     removed peers = peers that left the state or changed connection; expected errors; Rust
     `check_invariants()`.
+
+- `crates/wt-server/tests/server.rs` (in-process server, real sockets): offers and answers across
+  workers and shards (byte-exact), scrape merged across shards in request order, disconnect
+  cleanup across shards, bad / oversized / invalid-UTF-8 frames close and remove peers, binary,
+  fragmented and pipelined (same packet as the handshake) frames, the multi-shard answer rule,
+  idle timeout with pings, HTTP routes and ws path, origin rules, `maxConnections`, wss with a
+  generated certificate, backpressure drops; `ConnId` packing unit test. The suite
+  (`tests/suite`) runs once per transport: `server_fastwebsockets.rs`, `server_sockudo.rs`. `wt-proto/tests/owned.rs`:
+  `OwnedMessage` round trip (also across threads) and `Encoder::take`.
 
   Offer receivers are not compared exactly: both sides choose them randomly, and the swarm order
   may legitimately differ after multi-peer removals (disconnect, expiry). The deliberate
@@ -419,6 +442,33 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
 | 2 | 1.94 (1.1×) | 9.28 (1.4×) | 4.8× | 2.36 (1.4×) | 9.00 (1.4×) |
 | 4 | 3.50 (2.0×) | 17.23 (2.6×) | 4.9× | 3.50 (2.1×) | 13.86 (2.2×) |
 | 8 | 4.41 (2.5×) | 34.57 (5.3×) | 7.8× | 4.61 (2.7×) | 19.05 (3.0×) |
+
+### Load test (end to end, `loadtest/run.sh`)
+
+- {"cpu":"Apple M1","cores":8,"os":"darwin 27.0.0","node":"v26.3.0"}; client and server on the same machine.
+- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. JS with `compression: 0` (Rust does not negotiate permessage-deflate). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers.
+- Wire smoke check (same messages from JS and Rust): **yes**.
+
+| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB | RSS KiB / conn | RTT p50 / p99 ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| light js ws | 3000 (3000) | 5 s | 0 | 19,209 | 0.34 | 17.5 | 105.3 | 35.9 | 0.47 / 1.67 |
+| light js wss | 3000 (3000) | 5 s | 0 | 19,212 | 0.39 | 20.2 | 103.9 | 35.5 | 0.54 / 1.50 |
+| light js-workers ws | 3000 (2962) | 5 s | 38 | 18,965 | 0.78 | 41.1 | 191.6 | 66.2 | 0.49 / 1.57 |
+| light js-workers wss | 3000 (2939) | 5 s | 61 | 18,816 | 0.75 | 39.9 | 242.8 | 84.6 | 0.50 / 2.00 |
+| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,210 | 0.26 | 13.5 | 219.5 | 74.9 | 0.29 / 1.45 |
+| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,208 | 0.30 | 15.8 | 194.2 | 66.3 | 0.37 / 52.83 |
+| light rust-1-sockudo ws | 3000 (2947) | 5 s | 53 | 18,875 | 0.26 | 14.0 | 343.8 | 119.5 | 0.31 / 2.34 |
+| light rust-1-sockudo wss | 3000 (2947) | 5 s | 53 | 18,873 | 0.35 | 18.8 | 380.8 | 132.3 | 0.34 / 1.70 |
+| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,215 | 0.50 | 26.2 | 246.0 | 84.0 | 0.46 / 1.96 |
+| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,214 | 0.52 | 27.0 | 252.3 | 86.1 | 0.48 / 2.09 |
+| light rust-n-sockudo ws | 3000 (3000) | 5 s | 0 | 19,215 | 0.52 | 27.1 | 375.4 | 128.1 | 0.50 / 2.14 |
+| light rust-n-sockudo wss | 3000 (3000) | 5 s | 0 | 19,214 | 0.53 | 27.4 | 411.4 | 140.4 | 0.50 / 2.13 |
+| heavy js ws | 4000 (4000) | 1 s | 1 | 128,048 | 0.69 | 5.4 | 71.1 | 18.2 | 0.50 / 1.50 |
+| heavy js-workers ws | 4000 (3922) | 1 s | 78 | 126,108 | 1.26 | 10.0 | 302.8 | 79.1 | 286.98 / 571.39 |
+| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 128,055 | 0.51 | 3.9 | 246.6 | 63.1 | 0.45 / 1.71 |
+| heavy rust-1-sockudo ws | 4000 (4000) | 1 s | 0 | 128,059 | 0.49 | 3.9 | 641.0 | 164.1 | 0.30 / 1.59 |
+| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,050 | 1.37 | 10.7 | 298.4 | 76.4 | 0.45 / 2.08 |
+| heavy rust-n-sockudo ws | 4000 (4000) | 1 s | 0 | 128,083 | 1.31 | 10.2 | 506.5 | 129.7 | 0.46 / 1.93 |
 <!-- perf-tables:end -->
 
 ## 12. Open items
@@ -432,7 +482,126 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   these string-heavy frames. Re-measure on x86 (AVX2); remove the backend if it stays slower.
 - Optional: skip the UTF-8 check when the WebSocket layer already validated the text frame
   (costs ~0.5 µs per 14 KB).
-- Server: per-core runtimes, `SO_REUSEPORT`, cross-shard queues; choose the WebSocket stack
-  (fastwebsockets vs sockudo-ws) with a tracker-shaped load test.
+- **Multi-core efficiency (next):** with peers of a swarm on different workers, most offers and
+  answers cross workers; at 128k msgs/s `rust-n` uses ~2.7× the CPU of `rust-1` (§11). Plan:
+  move a connection to the worker that owns its swarm after its first announce (clients
+  usually use one swarm per connection), so traffic stays on one core; batch cross-worker
+  flushes.
+- **Memory per connection:** ~60–90 KiB vs ~20–35 KiB for JS with 14 KB frames, because each
+  fastwebsockets connection keeps a read buffer of its largest frame. Next: own WebSocket framing
+  reading into one shared buffer per worker (the uWebSockets approach); it also makes moving a
+  connection between workers possible.
+- **sockudo-ws result (M1):** same CPU per message as fastwebsockets (3.9 µs at 128k msgs/s on
+  one worker), about 2× the memory per connection (120–165 KiB: 64 KiB read + 16 KiB write buffer
+  per connection), multi-core overhead unchanged; with 1 worker ~1.8% of connections were reset
+  during the ramp (listen backlog overflow; not seen with fastwebsockets). Keep as an option
+  until re-measured on Linux / Ampere A1, then remove if it stays behind.
+- TLS / large tests on Linux and Ampere A1 with a separate client machine; `reusePort`.
 - Hardening: check the requesting connection on stop; optionally require the answer target to
   share the swarm.
+
+## 13. Server (`crates/wt-server`, binary `wt-tracker`)
+
+`wt-tracker [config.json]` reads the given file, else `./config.json` if it exists, else uses
+defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-process
+(tests); dropping the `Server` stops it.
+
+### 13.1 Configuration (JS format)
+
+| Field | Default | Notes |
+|---|---|---|
+| `servers[].server.host` / `.port` | `0.0.0.0` / `8000` | one listener per item; port 0 = any (`Server::local_addrs`) |
+| `servers[].server.key_file_name` + `cert_file_name` | — | PEM; both set → wss:// (rustls, ring, TLS 1.2 + 1.3, ALPN `http/1.1`) |
+| `servers[].server.passphrase`, `dh_params_file_name`, `ca_file_name`, `ssl_ciphers`, `ssl_prefer_low_memory_usage` | — | accepted, **ignored with a startup warning** |
+| `servers[].websockets.path` | `/*` | `/*` any path, `/a/*` prefix, else exact (query ignored) |
+| `servers[].websockets.maxPayloadLength` | 65536 | larger message → close |
+| `servers[].websockets.idleTimeout` | 240 s | no frame received for this long → close; pings every `idleTimeout / 2`; 0 = off |
+| `servers[].websockets.compression` | 0 | accepted; > 0 → warning, permessage-deflate is never negotiated |
+| `servers[].websockets.maxConnections` | 0 (off) | upgrade denied (TCP close) when open WebSockets `> maxConnections` (same off-by-one as JS) |
+| `tracker.maxOffers` / `announceInterval` | 20 / 20 | §6; expiry runs every `announceInterval` |
+| `tracker.offerSelection` | `sample` | `sample` / `window` / `round_robin` (§5.2) |
+| `websocketsAccess.allowOrigins` / `denyOrigins` / `denyEmptyOrigin` | — | both lists set → config error; denied → TCP close |
+| `workers` (new) | available parallelism | 1–64; one shard each |
+| `reusePort` (new) | false | Linux only: one `SO_REUSEPORT` socket per worker; otherwise one shared socket |
+| `maxBackpressure` (new) | 1 MiB | per-connection queued bytes; further messages to it are dropped (`droppedMessages`) |
+| `indexHtml` (new) | `./index.html` if present | served at `GET /` |
+| `transport` (new) | `fastwebsockets` | `fastwebsockets` or `sockudo` (sockudo-ws), §13.2 |
+
+Unknown fields are ignored. Invalid config (wrong types, both origin lists, half a key pair,
+`workers` out of range, unknown `offerSelection`) → error at startup.
+
+### 13.2 Connections and HTTP
+
+- TCP (`TCP_NODELAY`) → optional TLS handshake → one HTTP/1.1 request head (≤ 8 KiB; TLS +
+  head within 10 s).
+- `GET` with `Upgrade: websocket` on a matching path → `maxConnections` and origin checks (fail
+  → TCP close) → `101` with `Sec-WebSocket-Accept` (requested `Sec-WebSocket-Protocol` echoed,
+  like uws-tracker; no extensions). Bytes sent right after the head are kept.
+- Otherwise: `GET /` → `index.html` (200) or `404 Not Found`; `GET /stats.json` (§13.5); anything
+  else → `404 Not Found`. HTTP responses close the connection.
+- WebSocket, `transport: "fastwebsockets"` (split): a reader task and a writer task per
+  connection; pings every `idleTimeout / 2`.
+- `transport: "sockudo"` (sockudo-ws, unsplit stream): one task per connection that reads frames
+  and writes its queue with `feed` + one `flush` per wake-up; the library's heartbeat does the
+  idle timeout (`idleTimeout`), pings after `idleTimeout / 2` of inbound silence and closes when
+  the pong is `idleTimeout / 2` late. Same behaviour otherwise (both pass the same test suite).
+- Common to both: Text and
+  binary frames are both parsed (§7); fragmented messages are reassembled; pings answered;
+  a close frame, read error, idle timeout or rejected message (§7.3) closes the connection: the
+  writer sends close code 1000 and the connection's peers are removed (§13.3).
+- Frame payloads are taken from the read buffer without copying (`Bytes`).
+
+### 13.3 Workers and sharding
+
+- N workers: a thread each, with a current-thread tokio runtime, its own `Shard` (seeded per
+  worker), its accepted connections and an inbox channel. Every worker accepts on every
+  listener.
+- `ConnId` = worker (8 bits) | generation (24 bits) | slot (32 bits); messages for a closed
+  connection or a reused slot are dropped.
+- A frame is parsed once by the worker that owns the connection, then routed:
+  - announce / stop / answer / scrape of one hash → shard `foldhash(info_hash) % N` (seed shared
+    by all workers); local shard → applied directly; otherwise sent as an `OwnedMessage` (frame
+    `Bytes` + offsets, no copy, no re-parse);
+  - a stop whose ids cannot match → nothing; an answer without a usable `info_hash` → local shard
+    if N = 1, else `BadField("info_hash")`;
+  - scrape of all / several hashes → gathered (§13.4).
+- The owning shard's output is encoded once per batch (`Encoder::take`): each message is a slice
+  of one buffer, delivered to its connection's queue (local) or batched per destination worker
+  (one channel send per destination per scheduler tick).
+- A rejected message on a remote shard closes the connection on its own worker (`Close` event).
+- Each connection remembers which shards it announced to; on close every one of them gets a
+  disconnect, through the same FIFO as its requests.
+
+### 13.4 Scrape and stats across shards
+
+Scrape of all swarms or of several hashes is scattered to the shards owning them and gathered;
+entries are encoded in request order with the first occurrence kept (§7.2), all swarms in shard
+order. `/stats.json` gathers `(info_hash, peers)` of every shard.
+
+### 13.5 `/stats.json`
+
+`{"torrentsCount", "peersCount", "servers":[{"server":"host:port","webSocketsCount"}],
+"memory":{"rss"}, "workers", "droppedMessages", "peersCountPerInfoHashPerTracker":[{"totalPeers",
+"<hex info_hash>": peers, …} per shard]}`. The hex is computed like JS `Buffer.from(infoHash,
+"binary").toString("hex")` (one byte per character).
+
+## 14. Load test (`crates/wt-loadgen`, `loadtest/run.sh`)
+
+- `wt-loadgen load`: N clients (tokio multi-thread, tokio-tungstenite, rustls with `--ca`), one
+  connection and one peer each, in one of `--swarms` swarms. Each announces `started` with
+  `--offers` offers (SDP from `bench/fixtures/offer.sdp`), re-announces every `--interval` s
+  (spread over the interval), and answers every offer it receives. Connects are paced evenly at
+  `--ramp` per second (bursts overflow small listen backlogs, e.g. macOS `somaxconn` = 128).
+  After the ramp, a `--duration` s steady phase measures messages/s, announce → reply RTT
+  (HdrHistogram), and the server's CPU seconds and RSS (`/proc` or `ps`, `--server-pid`).
+  Connection failures are reported by reason.
+- `wt-loadgen smoke`: a deterministic script over 3 clients (announces with full fan-out, an
+  answer, a second swarm, scrapes, a stop, an invalid frame); the received messages per client,
+  sorted.
+- `wt-loadgen gen-cert DIR`: self-signed `cert.pem` / `key.pem` for `localhost` (rcgen).
+- `loadtest/run.sh`: for the profiles light (`LIGHT_CONNS`=3000, re-announce every 5 s, ws and
+  wss) and heavy (`HEAVY_CONNS`=4000, every 1 s, ws), runs the JS tracker (`run-tracker.ts`), the
+  JS multi-worker tracker (`run-worker-tracker.ts`), Rust with 1 worker and with all cores, for
+  both transports (`rust-*-sockudo`), each in a fresh process with the same config (`compression: 0`,
+  `announceInterval: 120`); then the smoke script against JS and Rust, compared exactly. Writes
+  `bench/results/load.json` and regenerates the load table of §11.

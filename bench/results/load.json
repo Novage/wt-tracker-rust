@@ -1,0 +1,638 @@
+{
+  "env": {
+    "cpu": "Apple M1",
+    "cores": 8,
+    "os": "darwin 27.0.0",
+    "node": "v26.3.0"
+  },
+  "smoke_same": true,
+  "runs": [
+    {
+      "closed_early": 0,
+      "connected": 3922,
+      "conns": 4000,
+      "duration_s": 15.000973792,
+      "failed": 78,
+      "failures": {
+        "HTTP error: 404 Not Found": 20,
+        "IO error: Broken pipe (os error 32)": 7,
+        "IO error: Connection reset by peer (os error 54)": 50,
+        "IO error: Invalid argument (os error 22)": 1
+      },
+      "interval_s": 1,
+      "label": "heavy js-workers ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 3923.4786231936378,
+        "answers_received": 39499.63570471652,
+        "answers_sent": 39373.84387105527,
+        "offers": 39373.84387105527,
+        "received": 82810.89062781291,
+        "replies": 3937.411052041121,
+        "sent": 43297.32249424891
+      },
+      "rtt_ms": {
+        "max": 743.423,
+        "p50": 286.975,
+        "p99": 571.391,
+        "samples": 59064
+      },
+      "server": {
+        "cpu_cores": 1.2592515833921405,
+        "cpu_us_per_message": 9.985484309204303,
+        "rss_bytes": 317489152,
+        "rss_bytes_per_conn": 80950.82916879143
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 1,
+      "connected": 4000,
+      "conns": 4000,
+      "duration_s": 15.000817958,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 1,
+      "label": "heavy js ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 4001.6484546422225,
+        "answers_received": 40016.41788339073,
+        "answers_sent": 40014.48465547735,
+        "offers": 40014.48465547735,
+        "received": 84032.3510044158,
+        "replies": 4001.4484655477345,
+        "sent": 44016.13311011957
+      },
+      "rtt_ms": {
+        "max": 5.675,
+        "p50": 0.498,
+        "p99": 1.503,
+        "samples": 60008
+      },
+      "server": {
+        "cpu_cores": 0.6859625940938973,
+        "cpu_us_per_message": 5.357053610102288,
+        "rss_bytes": 74530816,
+        "rss_bytes_per_conn": 18632.704
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 4000,
+      "conns": 4000,
+      "duration_s": 15.001414083,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 1,
+      "label": "heavy rust-1-sockudo ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 4001.9560601312414,
+        "answers_received": 40022.02703546291,
+        "answers_sent": 40016.894186014586,
+        "offers": 40016.894186014586,
+        "received": 84040.61064007896,
+        "replies": 4001.6894186014583,
+        "sent": 44018.85024614583
+      },
+      "rtt_ms": {
+        "max": 9.983,
+        "p50": 0.304,
+        "p99": 1.587,
+        "samples": 60007
+      },
+      "server": {
+        "cpu_cores": 0.4946200377475441,
+        "cpu_us_per_message": 3.8624248011397793,
+        "rss_bytes": 672120832,
+        "rss_bytes_per_conn": 168030.208
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 4000,
+      "conns": 4000,
+      "duration_s": 15.001551416,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 1,
+      "label": "heavy rust-1 ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 4001.7194445617465,
+        "answers_received": 40017.19444561747,
+        "answers_sent": 40017.19444561747,
+        "offers": 40017.19444561747,
+        "received": 84036.10833579669,
+        "replies": 4001.7194445617465,
+        "sent": 44018.91389017922
+      },
+      "rtt_ms": {
+        "max": 3.165,
+        "p50": 0.451,
+        "p99": 1.713,
+        "samples": 60005
+      },
+      "server": {
+        "cpu_cores": 0.5052810732572302,
+        "cpu_us_per_message": 3.9458122334754795,
+        "rss_bytes": 258572288,
+        "rss_bytes_per_conn": 64643.072
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 4000,
+      "conns": 4000,
+      "duration_s": 15.000812375,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 1,
+      "label": "heavy rust-n-sockudo ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 4002.849878988637,
+        "answers_received": 40024.43234345166,
+        "answers_sent": 40026.49889819717,
+        "offers": 40026.49889819717,
+        "received": 84053.58113146856,
+        "replies": 4002.649889819717,
+        "sent": 44029.348777185805
+      },
+      "rtt_ms": {
+        "max": 8.127,
+        "p50": 0.459,
+        "p99": 1.932,
+        "samples": 60007
+      },
+      "server": {
+        "cpu_cores": 1.309929056425519,
+        "cpu_us_per_message": 10.227194657084505,
+        "rss_bytes": 531152896,
+        "rss_bytes_per_conn": 132788.224
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 4000,
+      "conns": 4000,
+      "duration_s": 15.0007625,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 1,
+      "label": "heavy rust-n ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 4001.7965753407534,
+        "answers_received": 40015.03256917773,
+        "answers_sent": 40015.96585506903,
+        "offers": 40015.96585506903,
+        "received": 84032.52834647571,
+        "replies": 4001.529922228953,
+        "sent": 44017.762430409784
+      },
+      "rtt_ms": {
+        "max": 5.811,
+        "p50": 0.451,
+        "p99": 2.075,
+        "samples": 60001
+      },
+      "server": {
+        "cpu_cores": 1.3725968929912729,
+        "cpu_us_per_message": 10.71920168758447,
+        "rss_bytes": 312901632,
+        "rss_bytes_per_conn": 78225.408
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 2962,
+      "conns": 3000,
+      "duration_s": 15.001654625,
+      "failed": 38,
+      "failures": {
+        "HTTP error: 404 Not Found": 38
+      },
+      "interval_s": 5,
+      "label": "light js-workers ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 592.7346164323524,
+        "answers_received": 5926.679571187635,
+        "answers_sent": 5926.679571187635,
+        "offers": 5926.679571187635,
+        "received": 12446.027099494033,
+        "replies": 592.6679571187635,
+        "sent": 6519.414187619987
+      },
+      "rtt_ms": {
+        "max": 3.349,
+        "p50": 0.495,
+        "p99": 1.573,
+        "samples": 8887
+      },
+      "server": {
+        "cpu_cores": 0.7799139689899373,
+        "cpu_us_per_message": 41.12290123825625,
+        "rss_bytes": 200900608,
+        "rss_bytes_per_conn": 67825.99864956111
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 2939,
+      "conns": 3000,
+      "duration_s": 15.001492958,
+      "failed": 61,
+      "failures": {
+        "HTTP error: 404 Not Found": 61
+      },
+      "interval_s": 5,
+      "label": "light js-workers wss",
+      "offers": 10,
+      "per_second": {
+        "announces": 588.0081419026988,
+        "answers_received": 5880.0814190269875,
+        "answers_sent": 5880.0814190269875,
+        "offers": 5880.0814190269875,
+        "received": 12348.170979956674,
+        "replies": 588.0081419026988,
+        "sent": 6468.089560929686
+      },
+      "rtt_ms": {
+        "max": 56.895,
+        "p50": 0.503,
+        "p99": 2.004,
+        "samples": 8817
+      },
+      "server": {
+        "cpu_cores": 0.7512585601681685,
+        "cpu_us_per_message": 39.92602879492121,
+        "rss_bytes": 254574592,
+        "rss_bytes_per_conn": 86619.45968016332
+      },
+      "swarms": 100,
+      "url": "wss://localhost:18443/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 3000,
+      "conns": 3000,
+      "duration_s": 15.000700958,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 5,
+      "label": "light js ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 600.3052807474012,
+        "answers_received": 6002.5861626139085,
+        "answers_sent": 6003.052807474012,
+        "offers": 6003.052807474012,
+        "received": 12605.944250835322,
+        "replies": 600.3052807474012,
+        "sent": 6603.358088221414
+      },
+      "rtt_ms": {
+        "max": 3.005,
+        "p50": 0.472,
+        "p99": 1.668,
+        "samples": 9001
+      },
+      "server": {
+        "cpu_cores": 0.33598429927450324,
+        "cpu_us_per_message": 17.49070806134241,
+        "rss_bytes": 110428160,
+        "rss_bytes_per_conn": 36809.386666666665
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 3000,
+      "conns": 3000,
+      "duration_s": 15.00051,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 5,
+      "label": "light js wss",
+      "offers": 10,
+      "per_second": {
+        "announces": 600.3795870940388,
+        "answers_received": 6003.5958777401565,
+        "answers_sent": 6003.795870940388,
+        "offers": 6003.795870940388,
+        "received": 12607.771335774583,
+        "replies": 600.3795870940388,
+        "sent": 6604.175458034427
+      },
+      "rtt_ms": {
+        "max": 3.189,
+        "p50": 0.535,
+        "p99": 1.495,
+        "samples": 9001
+      },
+      "server": {
+        "cpu_cores": 0.38732016444774214,
+        "cpu_us_per_message": 20.16038086117097,
+        "rss_bytes": 108904448,
+        "rss_bytes_per_conn": 36301.48266666666
+      },
+      "swarms": 100,
+      "url": "wss://localhost:18443/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 2947,
+      "conns": 3000,
+      "duration_s": 15.000572208,
+      "failed": 53,
+      "failures": {
+        "IO error: Connection reset by peer (os error 54)": 53
+      },
+      "interval_s": 5,
+      "label": "light rust-1-sockudo ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 589.7775016396895,
+        "answers_received": 5898.441657633065,
+        "answers_sent": 5898.441657633065,
+        "offers": 5898.441657633065,
+        "received": 12386.727481029437,
+        "replies": 589.8441657633065,
+        "sent": 6488.219159272754
+      },
+      "rtt_ms": {
+        "max": 46.271,
+        "p50": 0.313,
+        "p99": 2.339,
+        "samples": 8842
+      },
+      "server": {
+        "cpu_cores": 0.2639899295233605,
+        "cpu_us_per_message": 13.986260970914932,
+        "rss_bytes": 360497152,
+        "rss_bytes_per_conn": 122326.82456735663
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 2947,
+      "conns": 3000,
+      "duration_s": 15.0004175,
+      "failed": 53,
+      "failures": {
+        "IO error: Broken pipe (os error 32)": 2,
+        "IO error: Connection reset by peer (os error 54)": 50,
+        "IO error: Invalid argument (os error 22)": 1
+      },
+      "interval_s": 5,
+      "label": "light rust-1-sockudo wss",
+      "offers": 10,
+      "per_second": {
+        "announces": 589.7835843569021,
+        "answers_received": 5897.5025195132075,
+        "answers_sent": 5897.835843569021,
+        "offers": 5897.835843569021,
+        "received": 12385.12194743913,
+        "replies": 589.7835843569021,
+        "sent": 6487.6194279259225
+      },
+      "rtt_ms": {
+        "max": 5.567,
+        "p50": 0.336,
+        "p99": 1.701,
+        "samples": 8842
+      },
+      "server": {
+        "cpu_cores": 0.3546567953858618,
+        "cpu_us_per_message": 18.792012688140904,
+        "rss_bytes": 399278080,
+        "rss_bytes_per_conn": 135486.2843569732
+      },
+      "swarms": 100,
+      "url": "wss://localhost:18443/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 3000,
+      "conns": 3000,
+      "duration_s": 15.000378125,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 5,
+      "label": "light rust-1 ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 600.3182003120338,
+        "answers_received": 6003.182003120338,
+        "answers_sent": 6003.182003120338,
+        "offers": 6003.248668106492,
+        "received": 12606.748871538864,
+        "replies": 600.3182003120338,
+        "sent": 6603.500203432372
+      },
+      "rtt_ms": {
+        "max": 4.979,
+        "p50": 0.288,
+        "p99": 1.449,
+        "samples": 9000
+      },
+      "server": {
+        "cpu_cores": 0.2586601462754793,
+        "cpu_us_per_message": 13.46469508365115,
+        "rss_bytes": 230211584,
+        "rss_bytes_per_conn": 76737.19466666666
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 3000,
+      "conns": 3000,
+      "duration_s": 15.002076458,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 5,
+      "label": "light rust-1 wss",
+      "offers": 10,
+      "per_second": {
+        "announces": 600.1835829331833,
+        "answers_received": 6002.502403724251,
+        "answers_sent": 6002.502403724251,
+        "offers": 6002.502403724251,
+        "received": 12605.255047820927,
+        "replies": 600.2502403724251,
+        "sent": 6602.685986657434
+      },
+      "rtt_ms": {
+        "max": 123.327,
+        "p50": 0.366,
+        "p99": 52.831,
+        "samples": 9002
+      },
+      "server": {
+        "cpu_cores": 0.30262477415778016,
+        "cpu_us_per_message": 15.755190710684035,
+        "rss_bytes": 203620352,
+        "rss_bytes_per_conn": 67873.45066666667
+      },
+      "swarms": 100,
+      "url": "wss://localhost:18443/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 3000,
+      "conns": 3000,
+      "duration_s": 15.001466125,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 5,
+      "label": "light rust-n-sockudo ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 600.5413020922314,
+        "answers_received": 6004.7464194103895,
+        "answers_sent": 6004.7464194103895,
+        "offers": 6004.7464194103895,
+        "received": 12609.967480761818,
+        "replies": 600.474641941039,
+        "sent": 6605.287721502621
+      },
+      "rtt_ms": {
+        "max": 5.759,
+        "p50": 0.504,
+        "p99": 2.137,
+        "samples": 9000
+      },
+      "server": {
+        "cpu_cores": 0.5199491793006332,
+        "cpu_us_per_message": 27.059186767363848,
+        "rss_bytes": 393625600,
+        "rss_bytes_per_conn": 131208.53333333333
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 3000,
+      "conns": 3000,
+      "duration_s": 15.000181208,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 5,
+      "label": "light rust-n-sockudo wss",
+      "offers": 10,
+      "per_second": {
+        "announces": 600.459412796715,
+        "answers_received": 6003.927469354076,
+        "answers_sent": 6004.594127967151,
+        "offers": 6004.594127967151,
+        "received": 12608.981010117941,
+        "replies": 600.459412796715,
+        "sent": 6605.053540763865
+      },
+      "rtt_ms": {
+        "max": 8.631,
+        "p50": 0.5,
+        "p99": 2.133,
+        "samples": 9000
+      },
+      "server": {
+        "cpu_cores": 0.5266603043293049,
+        "cpu_us_per_message": 27.410188262887992,
+        "rss_bytes": 431341568,
+        "rss_bytes_per_conn": 143780.52266666666
+      },
+      "swarms": 100,
+      "url": "wss://localhost:18443/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 3000,
+      "conns": 3000,
+      "duration_s": 15.001185458,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 5,
+      "label": "light rust-n ws",
+      "offers": 10,
+      "per_second": {
+        "announces": 600.4858766142454,
+        "answers_received": 6004.8587661424535,
+        "answers_sent": 6004.725443345692,
+        "offers": 6004.725443345692,
+        "received": 12610.07008610239,
+        "replies": 600.4858766142454,
+        "sent": 6605.211319959937
+      },
+      "rtt_ms": {
+        "max": 4.123,
+        "p50": 0.46,
+        "p99": 1.962,
+        "samples": 9001
+      },
+      "server": {
+        "cpu_cores": 0.5026269437912311,
+        "cpu_us_per_message": 26.157667596408697,
+        "rss_bytes": 257966080,
+        "rss_bytes_per_conn": 85988.69333333333
+      },
+      "swarms": 100,
+      "url": "ws://127.0.0.1:18100/"
+    },
+    {
+      "closed_early": 0,
+      "connected": 3000,
+      "conns": 3000,
+      "duration_s": 15.000941375,
+      "failed": 0,
+      "failures": {},
+      "interval_s": 5,
+      "label": "light rust-n wss",
+      "offers": 10,
+      "per_second": {
+        "announces": 600.4289847442991,
+        "answers_received": 6004.289847442991,
+        "answers_sent": 6004.289847442991,
+        "offers": 6004.289847442991,
+        "received": 12609.008679630282,
+        "replies": 600.4289847442991,
+        "sent": 6604.71883218729
+      },
+      "rtt_ms": {
+        "max": 5.687,
+        "p50": 0.481,
+        "p99": 2.091,
+        "samples": 9002
+      },
+      "server": {
+        "cpu_cores": 0.5179674932234044,
+        "cpu_us_per_message": 26.958199178416784,
+        "rss_bytes": 264601600,
+        "rss_bytes_per_conn": 88200.53333333334
+      },
+      "swarms": 100,
+      "url": "wss://localhost:18443/"
+    }
+  ]
+}

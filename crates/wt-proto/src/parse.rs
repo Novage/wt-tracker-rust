@@ -48,6 +48,20 @@ pub enum Message<'a> {
     },
 }
 
+impl Message<'_> {
+    /// The `info_hash` that decides which shard owns the message. `None` for scrapes (they
+    /// may span shards), for stops that cannot match, and for answers without a usable
+    /// string `info_hash`.
+    pub fn route_info_hash(&self) -> Option<Key> {
+        match self {
+            Message::Announce { info_hash, .. } => Some(*info_hash),
+            Message::Answer { info_hash, .. } => lookup_key(*info_hash),
+            Message::Stop { info_hash, .. } => *info_hash,
+            Message::Scrape { .. } => None,
+        }
+    }
+}
+
 /// A JSON parsing backend.
 pub trait Backend {
     fn parse(frame: &[u8]) -> Result<Message<'_>, ProtoError>;

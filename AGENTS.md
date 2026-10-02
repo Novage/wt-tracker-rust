@@ -9,6 +9,8 @@ multi-core operation, zero-copy message handling and fast WebSockets.
 
 - `crates/wt-core`: sans-IO tracker math (`Shard`): peers, swarms, offer routing.
 - `crates/wt-proto`: zero-copy wire protocol (JSON frames ↔ `wt-core`), byte-compatible with JS.
+- `crates/wt-server`: the multi-core WebSocket server (binary `wt-tracker`).
+- `crates/wt-loadgen`, `loadtest/run.sh`: load generator and the JS vs Rust load test.
 - `crates/wt-bench`: Rust benchmarks. `bench/js`: identical JS benchmarks against `../wt-tracker`.
 - `docs/SPEC.md`: **the specification and source of truth for behaviour.**
 - `.agents/skills/`: shared agent skills (`SKILL.md` format). `.claude/skills` is a symlink to
@@ -28,6 +30,8 @@ behaviour.
    |---|---|
    | request handling, offer selection, removal/expiry rules, outbox events | §5 |
    | wire protocol: parsing rules, message layouts, errors, backends (`wt-proto`) | §7 |
+   | server: config, HTTP / upgrade, workers and routing, backpressure, stats (`wt-server`) | §13 |
+   | load generator or load test scenarios | §14 |
    | `Settings` fields or defaults | §6 |
    | data structures, `Key`, indices | §3, and §4 plus `check_invariants()` if invariants change |
    | behaviour that now differs from (or matches) the JS `FastTracker` | §8 |
@@ -51,7 +55,13 @@ When a change can affect performance (anything in `crates/wt-core/src`, `crates/
 ```
 
 It takes about 3 minutes and needs `../wt-tracker` with its `node_modules` (or set
-`WT_TRACKER_DIR`). Run it on an idle machine, because background load skews the results. The
+`WT_TRACKER_DIR`). After server changes also run the end-to-end load test, which adds the load
+table to §11 (about 5 minutes):
+
+```bash
+./loadtest/run.sh
+```
+ Run it on an idle machine, because background load skews the results. The
 "Same messages" column must be `yes` for every twin scenario; `no` means Rust and JS diverged.
 Report significant regressions or improvements.
 

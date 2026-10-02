@@ -6,6 +6,7 @@
 
 mod encode;
 mod json;
+mod owned;
 mod parse;
 
 use std::fmt;
@@ -13,7 +14,8 @@ use std::fmt;
 use smallvec::SmallVec;
 use wt_core::{ConnId, Request, ScrapeTarget, Shard, TrackerError};
 
-pub use encode::Encoder;
+pub use encode::{Batch, Encoder};
+pub use owned::OwnedMessage;
 #[cfg(feature = "sonic")]
 pub use parse::Sonic;
 pub use parse::{Backend, INLINE_OFFERS, Message, SerdeJson};
@@ -87,7 +89,7 @@ pub fn handle(
     handle_with::<DefaultBackend>(shard, now, conn, frame, out)
 }
 
-/// [`handle`] with an explicit parser backend.
+/// [`handle`] with an explicit parser backend: [`Backend::parse`] then [`apply`].
 pub fn handle_with<B: Backend>(
     shard: &mut Shard,
     now: u32,
@@ -95,7 +97,18 @@ pub fn handle_with<B: Backend>(
     frame: &[u8],
     out: &mut Encoder,
 ) -> Result<(), ProtoError> {
-    match B::parse(frame)? {
+    apply(shard, now, conn, &B::parse(frame)?, out)
+}
+
+/// Applies a parsed message from `conn` to `shard`; outgoing messages are appended to `out`.
+pub fn apply(
+    shard: &mut Shard,
+    now: u32,
+    conn: ConnId,
+    message: &Message<'_>,
+    out: &mut Encoder,
+) -> Result<(), ProtoError> {
+    match message {
         Message::Announce {
             info_hash,
             peer_id,
@@ -109,9 +122,9 @@ pub fn handle_with<B: Backend>(
             Request::Announce {
                 info_hash: info_hash.as_bytes(),
                 peer_id: peer_id.as_bytes(),
-                event,
-                left_zero,
-                numwant,
+                event: *event,
+                left_zero: *left_zero,
+                numwant: *numwant,
                 offers: offers.as_deref(),
             },
             out,
@@ -123,7 +136,7 @@ pub fn handle_with<B: Backend>(
             conn,
             Request::Answer {
                 to_peer_id: to_peer_id.as_bytes(),
-                answer: &answer,
+                answer,
             },
             out,
         )?,
@@ -143,7 +156,7 @@ pub fn handle_with<B: Backend>(
         Message::Stop { .. } => {}
         Message::Scrape { info_hashes } => {
             let slices: SmallVec<[&[u8]; 4]>;
-            let target = match &info_hashes {
+            let target = match info_hashes {
                 None => ScrapeTarget::All,
                 Some(hashes) => {
                     slices = hashes.iter().map(|h| h.as_ref()).collect();
