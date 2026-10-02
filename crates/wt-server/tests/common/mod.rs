@@ -13,13 +13,9 @@ use wt_server::{Config, Server};
 
 pub const WAIT: Duration = Duration::from_secs(5);
 
-/// Starts a server from a JSON config, with this test binary's transport unless set.
+/// Starts a server from a JSON config; listeners on 127.0.0.1 with port 0 unless given.
 pub fn start(config: &str) -> Server {
-    let mut value: serde_json::Value = serde_json::from_str(config).expect("config JSON");
-    if value.get("transport").is_none() {
-        value["transport"] = crate::TRANSPORT.into();
-    }
-    let config = Config::from_json(&value.to_string()).expect("config");
+    let config = Config::from_json(config).expect("config");
     wt_server::start(config).expect("start")
 }
 

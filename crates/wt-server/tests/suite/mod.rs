@@ -1,5 +1,4 @@
-//! In-process server tests over real sockets (spec §13), run once per transport (see
-//! `server_*.rs`).
+//! In-process server tests over real sockets (spec §13).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -351,7 +350,7 @@ async fn wss_with_rustls() {
         serde_json::to_string(&key_file).unwrap()
     ));
 
-    use tokio_rustls::rustls;
+    use rustls;
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.cert.der().clone()).unwrap();
     let client = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(

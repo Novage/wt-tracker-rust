@@ -62,12 +62,30 @@ pub struct OwnedMessage {
 }
 
 impl OwnedMessage {
-    /// `message` must have been parsed from `frame` (its slices point into it).
+    /// `message` must have been parsed from `frame` (its slices point into it). No copy.
     pub fn new(frame: Bytes, message: &Message<'_>) -> Self {
+        let (base, len) = (frame.as_ptr() as usize, frame.len());
+        Self::build(frame, base, len, message)
+    }
+
+    /// `message` was parsed from the borrowed `frame` (e.g. a shared read buffer): copies the
+    /// frame once into owned `Bytes`.
+    pub fn copy_from(frame: &[u8], message: &Message<'_>) -> Self {
+        Self::build(
+            Bytes::copy_from_slice(frame),
+            frame.as_ptr() as usize,
+            frame.len(),
+            message,
+        )
+    }
+
+    /// `base` / `base_len`: the buffer the message slices point into; `frame` holds the same
+    /// bytes.
+    fn build(frame: Bytes, base: usize, base_len: usize, message: &Message<'_>) -> Self {
         let span = |slice: &[u8]| -> Span {
             let start = (slice.as_ptr() as usize)
-                .checked_sub(frame.as_ptr() as usize)
-                .filter(|&s| s + slice.len() <= frame.len())
+                .checked_sub(base)
+                .filter(|&s| s + slice.len() <= base_len)
                 .expect("message slice outside of its frame");
             Span {
                 start: start as u32,

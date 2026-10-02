@@ -56,9 +56,13 @@ pub(crate) struct ScrapeEntry {
 /// Outgoing frames queued for a connection's writer task.
 pub(crate) enum Out {
     Text(Bytes),
-    Pong(Bytes),
+    /// Only the echo endpoint sends binary frames.
+    Binary(Bytes),
     Close,
 }
+
+/// A scrape spanning shards, gathered asynchronously.
+type ScrapeJob = Option<Vec<Vec<u8>>>;
 
 pub(crate) enum Pop {
     Frame(Out),
@@ -253,28 +257,38 @@ impl Worker {
     // ---- message flow ----
 
     /// One text/binary frame from a connection of this worker. `Err`: close the connection.
-    pub async fn handle_frame(
+    /// One message, parsed from the worker's shared read buffer: local requests are applied
+    /// without any copy; a scrape across shards continues in a separate task.
+    pub fn handle_message(self: &Rc<Self>, conn: ConnId, frame: &[u8]) -> Result<(), ProtoError> {
+        let message = <wt_proto::DefaultBackend as wt_proto::Backend>::parse(frame)?;
+        if let Some(job) = self.route_message(conn, frame, &message)? {
+            let me = self.clone();
+            spawn_local(async move { me.scrape(conn, job).await });
+        }
+        Ok(())
+    }
+
+    /// Routes a parsed message; returns a scrape to gather across shards.
+    fn route_message(
         self: &Rc<Self>,
         conn: ConnId,
-        frame: Bytes,
-    ) -> Result<(), ProtoError> {
-        let message = <wt_proto::DefaultBackend as wt_proto::Backend>::parse(&frame)?;
+        frame: &[u8],
+        message: &Message<'_>,
+    ) -> Result<Option<ScrapeJob>, ProtoError> {
         let workers = self.shared.workers;
 
-        if let Message::Scrape { info_hashes } = &message {
+        if let Message::Scrape { info_hashes } = message {
             return match info_hashes {
                 Some(hashes) if hashes.len() == 1 && workers > 1 => {
                     let shard = self.shard_of(&hashes[0]);
-                    self.route(shard, conn, &frame, &message)
+                    self.route(shard, conn, frame, message).map(|_| None)
                 }
-                _ if workers == 1 => self.apply_local(conn, &message),
-                _ => {
-                    let hashes = info_hashes
+                _ if workers == 1 => self.apply_local(conn, message).map(|_| None),
+                _ => Ok(Some(
+                    info_hashes
                         .as_ref()
-                        .map(|hashes| hashes.iter().map(|h| h.to_vec()).collect());
-                    self.scrape(conn, hashes).await;
-                    Ok(())
-                }
+                        .map(|hashes| hashes.iter().map(|h| h.to_vec()).collect()),
+                )),
             };
         }
 
@@ -287,13 +301,13 @@ impl Worker {
                         entry.shard_mask |= 1 << shard;
                     }
                 }
-                self.route(shard, conn, &frame, &message)
+                self.route(shard, conn, frame, message).map(|_| None)
             }
             // A stop that cannot match anything.
-            None if matches!(message, Message::Stop { .. }) => Ok(()),
+            None if matches!(message, Message::Stop { .. }) => Ok(None),
             // An answer without a usable info_hash: fine with one shard (JS semantics), but it
             // cannot be routed between shards (JS multi-worker rejects it too).
-            None if workers == 1 => self.apply_local(conn, &message),
+            None if workers == 1 => self.apply_local(conn, message).map(|_| None),
             None => Err(ProtoError::BadField("info_hash")),
         }
     }
@@ -302,13 +316,14 @@ impl Worker {
         self: &Rc<Self>,
         shard: usize,
         conn: ConnId,
-        frame: &Bytes,
+        frame: &[u8],
         message: &Message<'_>,
     ) -> Result<(), ProtoError> {
         if shard == self.id {
             self.apply_local(conn, message)
         } else {
-            let message = Box::new(OwnedMessage::new(frame.clone(), message));
+            // The frame is in the shared read buffer: one copy for the other worker.
+            let message = Box::new(OwnedMessage::copy_from(frame, message));
             self.push_remote(shard, Event::Request { conn, message });
             Ok(())
         }

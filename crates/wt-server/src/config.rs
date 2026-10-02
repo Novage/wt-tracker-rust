@@ -28,19 +28,6 @@ pub struct Config {
     /// `index.html` served at `/`. Default: `./index.html` if it exists.
     #[serde(default)]
     pub index_html: Option<PathBuf>,
-    /// WebSocket implementation.
-    #[serde(default)]
-    pub transport: Transport,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Transport {
-    /// fastwebsockets: reader and writer task per connection.
-    #[default]
-    Fastwebsockets,
-    /// sockudo-ws: one task per connection, batched writes, built-in heartbeat.
-    Sockudo,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

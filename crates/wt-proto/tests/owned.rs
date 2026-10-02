@@ -63,3 +63,18 @@ fn take_moves_messages_into_one_shared_buffer() {
     assert_eq!(got, expected);
     assert_eq!(batch.len(), expected.len());
 }
+
+#[test]
+fn copy_from_a_borrowed_buffer_gives_the_same_message() {
+    for (name, parse, _) in backends() {
+        for text in FRAMES {
+            let mut buffer = text.as_bytes().to_vec();
+            let message = parse(&buffer).unwrap();
+            let expected = format!("{message:?}");
+            let owned = OwnedMessage::copy_from(&buffer, &message);
+            drop(message);
+            buffer.fill(b' '); // the owned copy no longer depends on the buffer
+            assert_eq!(format!("{:?}", owned.message()), expected, "{name}");
+        }
+    }
+}

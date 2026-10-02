@@ -27,10 +27,9 @@ cargo build --release -q -p wt-server -p wt-loadgen
 mkdir -p "$OUT" bench/results
 ./target/release/wt-loadgen gen-cert "$OUT"
 
-config() { # $1 = workers ("" = default), $2 = transport
+config() { # $1 = workers ("" = default)
   local workers=""
   [ -n "$1" ] && workers=",\"workers\":$1"
-  workers="$workers,\"transport\":\"$2\""
   cat <<EOF
 {"servers":[
   {"server":{"host":"127.0.0.1","port":$WS_PORT},"websockets":{"compression":0}},
@@ -38,10 +37,8 @@ config() { # $1 = workers ("" = default), $2 = transport
  ],"tracker":{"announceInterval":120}$workers}
 EOF
 }
-config 1 fastwebsockets > "$OUT/config-1.json"
-config "" fastwebsockets > "$OUT/config-n.json"
-config 1 sockudo > "$OUT/config-1-sockudo.json"
-config "" sockudo > "$OUT/config-n-sockudo.json"
+config 1 > "$OUT/config-1.json"
+config "" > "$OUT/config-n.json"
 
 wait_port() {
   for _ in $(seq 100); do
@@ -69,8 +66,6 @@ declare -a TARGETS=(
   "js-workers|node $WT_TRACKER_DIR/src/run-worker-tracker.ts $OUT/config-1.json"
   "rust-1|./target/release/wt-tracker $OUT/config-1.json"
   "rust-n|./target/release/wt-tracker $OUT/config-n.json"
-  "rust-1-sockudo|./target/release/wt-tracker $OUT/config-1-sockudo.json"
-  "rust-n-sockudo|./target/release/wt-tracker $OUT/config-n-sockudo.json"
 )
 
 rm -f "$OUT"/run-*.json

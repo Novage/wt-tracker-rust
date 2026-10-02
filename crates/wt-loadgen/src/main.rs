@@ -180,9 +180,24 @@ async fn client(load: Arc<Load>, n: usize) {
                 load.counters.sent_announces.fetch_add(1, Relaxed);
             }
             message = ws.next() => {
-                let Some(Ok(message)) = message else {
-                    load.counters.closed_early.fetch_add(1, Relaxed);
-                    return;
+                let message = match message {
+                    Some(Ok(Message::Close(frame))) => {
+                        load.counters.closed_early.fetch_add(1, Relaxed);
+                        let reason = format!("closed by server: {:?}", frame.map(|f| u16::from(f.code)));
+                        *load.failures.lock().unwrap().entry(reason).or_default() += 1;
+                        return;
+                    }
+                    Some(Ok(message)) => message,
+                    Some(Err(e)) => {
+                        load.counters.closed_early.fetch_add(1, Relaxed);
+                        *load.failures.lock().unwrap().entry(format!("read error: {e}")).or_default() += 1;
+                        return;
+                    }
+                    None => {
+                        load.counters.closed_early.fetch_add(1, Relaxed);
+                        *load.failures.lock().unwrap().entry("stream ended".into()).or_default() += 1;
+                        return;
+                    }
                 };
                 let Message::Text(text) = message else { continue };
                 if text.contains("\"interval\":") {

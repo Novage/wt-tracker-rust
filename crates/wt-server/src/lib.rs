@@ -1,12 +1,15 @@
 //! Multi-core WebTorrent tracker server: N workers, each a thread with its own runtime, tracker
-//! shard and connections; WebSocket (fastwebsockets) over TCP or TLS (rustls). Spec §13.
+//! shard and connections; own WebSocket framing over TCP or TLS (rustls), reading into one
+//! shared buffer per worker. Spec §13.
 
 pub mod config;
 mod conn;
+pub mod echo;
 mod http;
 mod stats;
 mod tls;
 mod worker;
+mod ws;
 
 use std::hash::BuildHasher;
 use std::net::{SocketAddr, TcpListener as StdListener, ToSocketAddrs};
@@ -17,10 +20,9 @@ use std::thread::JoinHandle;
 use bytes::Bytes;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::{mpsc, watch};
-use tokio_rustls::TlsAcceptor;
 
+pub use config::Config;
 use config::{AccessConfig, WebSocketsConfig};
-pub use config::{Config, Transport};
 use worker::{Event, WorkerListener};
 
 /// State shared by all workers (read-only after start, plus atomics).
@@ -35,14 +37,14 @@ pub(crate) struct Shared {
     pub access: AccessConfig,
     pub index_html: Option<Bytes>,
     pub listeners: Vec<ListenerInfo>,
-    pub transport: Transport,
 }
 
 pub(crate) struct ListenerInfo {
     /// `host:port` as configured (for stats).
     pub name: String,
     pub websockets: WebSocketsConfig,
-    pub tls: Option<TlsAcceptor>,
+    /// wss:// when set.
+    pub tls: Option<Arc<rustls::ServerConfig>>,
     /// Open WebSocket connections on this listener, all workers.
     pub web_sockets: AtomicUsize,
 }
@@ -119,7 +121,7 @@ pub fn start(config: Config) -> Result<Server, String> {
             }
         }
         let tls = match (&s.cert_file_name, &s.key_file_name) {
-            (Some(cert), Some(key)) => Some(tls::acceptor(cert, key)?),
+            (Some(cert), Some(key)) => Some(tls::server_config(cert, key)?),
             _ => None,
         };
         addrs.push(local);
@@ -156,12 +158,7 @@ pub fn start(config: Config) -> Result<Server, String> {
         access: config.websockets_access.clone(),
         index_html,
         listeners,
-        transport: config.transport,
     });
-    if config.transport == Transport::Sockudo {
-        // Calibrates sockudo-ws' clock (up to 200 ms) before any runtime starts.
-        sockudo_ws::init_clock();
-    }
 
     let (shutdown, shutdown_rx) = watch::channel(false);
     let mut threads = Vec::new();
