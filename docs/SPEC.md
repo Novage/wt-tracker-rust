@@ -279,7 +279,9 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 - `Encoder`: one byte buffer plus a message index. `messages()` yields `(ConnId, &[u8])` in emission
   order, `removed()` the `peer_removed` events, `bytes()` the total size; `clear()` keeps capacity;
   `take()` moves all messages out as a `Batch` (one `Bytes` buffer, each message a slice of it).
-  Integers via `itoa`.
+  Integers via `itoa`. `counters()`: messages and JSON bytes produced since the encoder was
+  created, per kind (`announce_replies`, `offers`, `answers`, `scrapes`; `Count { messages,
+  bytes }`), not reset by `clear()` / `take()`.
 
 ## 8. Differences from the JS `FastTracker`
 
@@ -301,7 +303,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | `compression` > 1 (dedicated compressor) | per-connection compressor | treated as 1 (warning at startup) | no per-connection zlib state |
 | Offer with `server_max_window_bits=N` | accepted without echoing it (RFC 7692 §7.1.2.1 requires the echo) | `; server_max_window_bits=N` echoed | RFC |
 | `x-webkit-deflate-frame` (old Safari) | negotiated | not negotiated | obsolete |
-| Compressed outgoing messages | never | opt-in: `compressOutgoingMinSize` | extension |
+| Compressed outgoing messages | never | messages ≥ 1 KiB (offers) when negotiated; `compressOutgoingMinSize: 0` = never | ~25% less egress at no measurable CPU on production traffic (§12) |
 | Inflated message > `maxPayloadLength` / corrupt | connection closed | close 1009 / 1007 | |
 | Answer without a string `info_hash`, several workers | single tracker: delivered; multi-worker: error | 1 worker: delivered; > 1: `BadField("info_hash")` → close | cannot be routed to a shard |
 | Answer target only in a swarm of another shard | delivered (one global peer table) | `UnknownPeer` → close | per-shard peer tables; real answers target a member of the same swarm |
@@ -441,7 +443,11 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   `compression: 0` → RSV1 frame → 1002; inflated > `maxPayloadLength` → 1009, corrupt → 1007,
   invalid UTF-8 after inflating → 1007; `compressOutgoingMinSize` compresses only messages that
   long and only for clients that negotiated; a 40 KB compressed message in 4 fragments over TLS;
-  connections that move at their first compressed announce keep compression.
+  connections that move at their first compressed announce keep compression; with the default
+  (1024) an offer ≥ 1 KiB arrives compressed while short replies do not, and `/stats.json`
+  `traffic` counts the received and sent messages and bytes, the deflated and inflated bytes and
+  socket bytes (a connection moved at its first message is counted once).
+  `wt-proto/tests/encode.rs`: `Encoder::counters` per kind, kept across `clear` / `take`.
 - `tests/shutdown.rs`: a graceful shutdown closes every connection with 1001 and returns once
   they are closed, then connects are refused; a zero timeout returns at once with a client that
   never answers; the `wt-tracker` binary (Unix) closes with 1001 and exits 0 on SIGTERM. `wt-proto/tests/owned.rs`:
@@ -541,7 +547,7 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
 ### Load test (end to end, `loadtest/run.sh`)
 
 - {"cpu":"Apple M1","cores":8,"os":"darwin 27.0.0","node":"v26.3.0"}; client and server on the same machine.
-- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. Servers with `compression: 0` except in the deflate profile (the tungstenite client does not offer permessage-deflate anyway). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers, `rust-n-hash` = all-core workers with `placement: "hash"`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Profile deflate: like light, but clients offer permessage-deflate and compress everything they send; servers with `compression: 1` (`rust-n-out`: also compressing outgoing messages ≥ 1 KiB; `rust-n-off`: `compression: 0`, the uncompressed baseline). Wire = bytes on the client sockets (own client, deflate profile only). Local % = requests applied on the connection's own worker (Rust).
+- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. Servers with `compression: 0` except in the deflate profile (the tungstenite client does not offer permessage-deflate anyway). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers, `rust-n-hash` = all-core workers with `placement: "hash"`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Profile deflate: like light, but clients offer permessage-deflate and compress everything they send; servers with `compression: 1` (Rust compressing outgoing messages ≥ 1 KiB, the default; `rust-n-in`: `compressOutgoingMinSize: 0`, inflating only, like JS; `rust-n-off`: `compression: 0`, the uncompressed baseline). The deflate rows in the table below predate the 1 KiB default: there `rust-1` / `rust-n` inflated only and `rust-n-out` compressed ≥ 1 KiB. Wire = bytes on the client sockets (own client, deflate profile only). Local % = requests applied on the connection's own worker (Rust).
 - Wire smoke check (same messages from JS and Rust): **yes**.
 
 | Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % | Wire KiB/s server out / in |
@@ -642,6 +648,31 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   large; answers and replies stay under 1 KiB. Autobahn now includes 12.* / 13.*: 517 cases per
   server, 0 FAILED. Open: dedicated (context takeover) compression is not offered; a smaller
   outgoing threshold or a faster level was not measured.
+- **Production canary (done, tracker.novage.com.ua, 2026-10-02):** Oracle Cloud Ampere A1,
+  2 cores (Neoverse-N1), 11 GiB, Ubuntu 24.04; real p2p-media-loader peers on wss:// port 443
+  (Let's Encrypt certificate via systemd `LoadCredential`), `workers: 2`, `reusePort`,
+  `maxOffers: 10`, `announceInterval: 180`, `idleTimeout: 190`, `compression: 1`. Sampled every
+  minute (`/proc`, `ss`, `/proc/net/dev`, `/stats.json`):
+  - Rust vs aquatic_ws (its config corrected for 2 cores: 2 socket + 1 swarm worker), 30 min
+    each, at ~42k connections: CPU 0.35 vs 1.46 cores (load 0.3–0.5 vs 1.5–2.2), RSS 590 MiB
+    (14 KiB / connection, all tracker state) vs 1,896 MiB (46 KiB); Rust tracked 55.7k peers /
+    31.5k torrents, aquatic 51.1k / 28.9k; inbound 2.3–2.6 vs 5.3 MB/s (aquatic does not
+    negotiate permessage-deflate, so browsers send uncompressed); aquatic sent ~190 error
+    responses / s (cause not logged). Outbound 3.1–3.9 vs 2.8 MB/s: not attributable from
+    windows 30 min apart (more peers served, aquatic's rejected announces); `traffic` counters
+    added to `/stats.json` for that.
+  - Outgoing compression ≥ 1 KiB, back to back at ~45k connections: outbound 3.58 → 2.61 MB/s
+    (−27%; −20 to −25% per peer while evening traffic declined), CPU 0.339 → 0.327 cores (no
+    measurable cost, unlike the +60% of the local load test; fewer bytes to encrypt is a likely
+    reason, not verified), inbound −13% (fewer ACKs). At that rate egress is ~6.8 instead of
+    ~9.3 TB / month (Oracle free tier: 10 TB). Made the default (`compressOutgoingMinSize`
+    1024).
+  - RSS per connection rose from 11.4 to 14.1 KiB during the ramp, then stayed flat (568–570 MiB
+    at ~44k connections for 10 min): tracker state and caches, no sign of a leak.
+  - Restarting the service under load takes ~4 s (graceful 1001 to all connections). Switching
+    between Rust and aquatic took 4–5.5 min each way: orphaned connections of the stopped
+    listener (FIN-WAIT, LAST-ACK) keep its socket options, and a listener without
+    `SO_REUSEADDR` (aquatic), or one of another user, cannot bind the port until they drain.
 - **Placement, open (research):** creation-time balance cannot foresee popularity — a piece of
   content that outgrows one core stays on it (only its new hashes spill); fixing that needs
   moving live swarms or connections. Swarm-creation races in a mass reconnect (after a restart)
@@ -687,7 +718,7 @@ defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-
 | `servers[].websockets.maxPayloadLength` | 65536 | larger message → close |
 | `servers[].websockets.idleTimeout` | 240 s | no frame received for this long → close; pings every `idleTimeout / 2`; 0 = off |
 | `servers[].websockets.compression` | 1 | permessage-deflate (§13.2): 0 = off; 1 = negotiated like uWebSockets' shared compressor; other values → 1 with a startup warning |
-| `servers[].websockets.compressOutgoingMinSize` (new) | 0 | with permessage-deflate negotiated, outgoing messages at least this long are compressed; 0 = never (like JS) |
+| `servers[].websockets.compressOutgoingMinSize` (new) | 1024 | with permessage-deflate negotiated, outgoing messages at least this long are compressed; 0 = never (like JS) |
 | `servers[].websockets.maxConnections` | 0 (off) | upgrade denied (TCP close) when open WebSockets `> maxConnections` (same off-by-one as JS) |
 | `tracker.maxOffers` / `announceInterval` | 20 / 20 | §6; expiry runs every `announceInterval` |
 | `tracker.offerSelection` | `sample` | `sample` / `window` / `round_robin` (§5.2) |
@@ -738,7 +769,8 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
     appended, fed separately) by one raw inflater per worker thread (flate2 with zlib-rs, reset
     per message) into a buffer of the worker (freed above 256 KiB), at most `maxPayloadLength`
     bytes; then UTF-8 checked and handled like any message. Outgoing messages are compressed
-    only with `compressOutgoingMinSize` > 0, for messages at least that long and connections
+    when at least `compressOutgoingMinSize` bytes long (default 1024: offers; announce replies
+    and answers are shorter; 0 = never, like JS), for connections
     whose window is ≥ 9 (`server_max_window_bits=8` cannot be produced by zlib): one raw
     deflater per worker thread and window size (level 1, reset per message, sync flush, the
     trailing `00 00 ff ff` removed) into a new buffer per message, RSV1 set. Control frames are
@@ -826,9 +858,16 @@ encoded in request order with the first occurrence kept (§7.2), all swarms in s
 `{"torrentsCount", "peersCount", "servers":[{"server":"host:port","webSocketsCount"}],
 "memory":{"rss"}, "workers", "droppedMessages", "placement":{"mode", "movedConnections",
 "localRequests", "remoteRequests", "workers":[{"connections", "busy"} per worker],
-"directorySize"}, "peersCountPerInfoHashPerTracker":[{"totalPeers", "<hex info_hash>": peers, …}
-per shard]}`. `localRequests` / `remoteRequests`: requests of each worker's connections applied
-to its own shard / sent to another one (scrape gathers not counted); `busy`: 0–1, `content` only. The hex is computed like JS `Buffer.from(infoHash,
+"directorySize"}, "traffic":{…}, "peersCountPerInfoHashPerTracker":[{"totalPeers",
+"<hex info_hash>": peers, …} per shard]}`. `localRequests` / `remoteRequests`: requests of each
+worker's connections applied to its own shard / sent to another one (scrape gathers not counted);
+`busy`: 0–1, `content` only. `traffic` (totals of all workers since start, each `{"messages",
+"bytes"}`): `sent` (`announceReplies`, `offers`, `answers`, `scrapes`: JSON bytes as encoded, before
+framing and compression, counted by the shard that produced them), `received` (`announces`,
+`answers`, `stops`, `scrapes`, `invalid`: JSON bytes after inflating, counted once by the worker
+that handles them), `socketBytes` `{"in", "out"}` (bytes read from / written to sockets, TLS and
+the HTTP upgrade included), `compression` `{"deflated", "inflated"}` each `{"messages",
+"bytesBefore", "bytesAfter"}`. The hex is computed like JS `Buffer.from(infoHash,
 "binary").toString("hex")` (one byte per character).
 
 ### 13.6 Shutdown
@@ -880,9 +919,10 @@ to its own shard / sent to another one (scrape gathers not counted); `busy`: 0�
   (`rust-n-hash`), each in a fresh process with the same config (`compression: 0`,
   `announceInterval: 120`). After each run it keeps the server's `/stats.json` `placement`
   (Rust): the Local % column. Profile deflate (`DEFLATE_CONNS`=3000, every 5 s, ws, `--deflate`)
-  runs its own targets: `js`, `rust-1`, `rust-n` with `compression: 1`, `rust-n-out` (also
-  `compressOutgoingMinSize: 1024`) and `rust-n-off` (`compression: 0`: the uncompressed
-  baseline with the same client); the Wire column. Then the smoke script against JS and Rust
+  runs its own targets: `js`, `rust-1`, `rust-n` with `compression: 1` (Rust compressing outgoing
+  messages ≥ 1 KiB, the default), `rust-n-in` (`compressOutgoingMinSize: 0`: inflating only, like
+  JS) and `rust-n-off` (`compression: 0`: the uncompressed baseline with the same client); the
+  Wire column. Then the smoke script against JS and Rust
   (both `compression: 1`), compared exactly, the deflate step included.
   Writes `bench/results/load.json` and regenerates the load table of §11.
 - `loadtest/aquatic.sh`: the same profiles against [aquatic_ws](https://github.com/greatest-ape/aquatic)

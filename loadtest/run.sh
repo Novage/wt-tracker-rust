@@ -8,8 +8,9 @@
 # video and an audio swarm of their content, switching between 4 video qualities every 10 s
 # (old quality stopped after 5 s), re-announcing every 5 s (ws); deflate = DEFLATE_CONNS=3000 like
 # light, but clients offer permessage-deflate and compress everything they send (as browsers do),
-# against servers with compression 1 (rust-n-out: also compressing outgoing messages of at least
-# 1 KiB; rust-n-off: compression 0, the uncompressed baseline). SWARMS=100 DURATION=15 RAMP=1000.
+# against servers with compression 1 (rust-*: compressing outgoing messages of at least 1 KiB, the
+# default; rust-n-in: compressOutgoingMinSize 0, inflating only, like JS; rust-n-off: compression 0,
+# the uncompressed baseline). SWARMS=100 DURATION=15 RAMP=1000.
 # After each run the server's /stats.json "placement" is kept (Local % column).
 # On macOS keep conns below ~12000 (ephemeral ports per destination). The client shares the
 # machine with the server.
@@ -57,7 +58,7 @@ config 1 > "$OUT/config-1.json"
 config "" > "$OUT/config-n.json"
 config 1 "" 1 > "$OUT/config-1-deflate.json"
 config "" "" 1 > "$OUT/config-n-deflate.json"
-config "" "" 1 ',"compressOutgoingMinSize":1024' > "$OUT/config-n-deflate-out.json"
+config "" "" 1 ',"compressOutgoingMinSize":0' > "$OUT/config-n-deflate-in.json"
 config "" hash > "$OUT/config-n-hash.json"
 
 wait_port() {
@@ -93,7 +94,7 @@ declare -a DEFLATE_TARGETS=(
   "js|node $WT_TRACKER_DIR/src/run-tracker.ts $OUT/config-1-deflate.json"
   "rust-1|./target/release/wt-tracker $OUT/config-1-deflate.json"
   "rust-n|./target/release/wt-tracker $OUT/config-n-deflate.json"
-  "rust-n-out|./target/release/wt-tracker $OUT/config-n-deflate-out.json"
+  "rust-n-in|./target/release/wt-tracker $OUT/config-n-deflate-in.json"
   "rust-n-off|./target/release/wt-tracker $OUT/config-n.json"
 )
 

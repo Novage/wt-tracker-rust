@@ -34,6 +34,11 @@ announce, every offer answered (`loadtest/run.sh`; full table in
 | | Rust, 1 worker | **4.3** | **6.7** | **0.32 ms** |
 | | Rust, all cores | 5.4 | 7.3 | 0.30 ms |
 
+**In production** at `wss://tracker.novage.com.ua` (Oracle Ampere A1, 2 cores, real
+p2p-media-loader peers, ~42k connections): 0.35 cores and 590 MiB, against 1.46 cores and 1.9 GiB
+for aquatic_ws on the same host and load; compressing outgoing offers cut egress by ~25% at no
+measurable CPU cost ([spec §12](docs/SPEC.md#12-open-items)).
+
 Against [aquatic_ws](https://github.com/greatest-ape/aquatic) (Rust, io_uring) in a Linux
 container, for the same traffic, this server uses 1.8–5.4× less CPU and 4–14 KiB per connection
 instead of 75–102 KiB (`loadtest/aquatic.sh`).
@@ -80,14 +85,15 @@ Settings this server adds (all optional):
 | `maxBackpressure` | 1 MiB | queued outgoing bytes per connection before messages to it are dropped |
 | `indexHtml` | `./index.html` if present | page served at `GET /` |
 | `shutdownTimeout` | `5` | seconds to wait for connections to close on SIGTERM / SIGINT |
-| `websockets.compressOutgoingMinSize` | `0` (never) | with permessage-deflate, compress outgoing messages at least this long |
+| `websockets.compressOutgoingMinSize` | `1024` | with permessage-deflate, compress outgoing messages at least this long (0 = never, like the JS tracker) |
 | `tracker.offerSelection` | `sample` | how offers pick peers: `sample`, `window` or `round_robin` |
 
 Every setting and its exact behaviour: [spec §13.1](docs/SPEC.md#131-configuration-js-format).
 Deliberate differences from the JS tracker: [spec §8](docs/SPEC.md#8-differences-from-the-js-fasttracker).
 
 HTTP routes: the WebSocket upgrade on `websockets.path`, `GET /stats.json` (torrents, peers,
-connections, memory, placement counters) and `GET /`.
+connections, memory, placement counters, messages and bytes sent / received per kind, socket and
+compression bytes) and `GET /`.
 
 ## Repository
 

@@ -4,7 +4,7 @@
 //! record) is incomplete. TLS uses rustls' unbuffered API so it shares the same buffers.
 //! Spec §13.2.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io::{self, IoSlice};
 use std::sync::Arc;
@@ -45,6 +45,51 @@ thread_local! {
     static TX_PLAIN: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// Ciphertext to send.
     static TX_CIPHER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Socket and compression totals of one worker thread (all its connections), for
+/// `/stats.json`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct IoCounters {
+    /// Bytes read from / written to sockets (TLS records included).
+    pub socket_in: u64,
+    pub socket_out: u64,
+    /// Outgoing messages compressed, and their bytes before / after.
+    pub deflated: u64,
+    pub deflate_in: u64,
+    pub deflate_out: u64,
+    /// Incoming compressed messages, and their bytes before / after inflating.
+    pub inflated: u64,
+    pub inflate_in: u64,
+    pub inflate_out: u64,
+}
+
+thread_local! {
+    static IO: Cell<IoCounters> = const {
+        Cell::new(IoCounters {
+            socket_in: 0,
+            socket_out: 0,
+            deflated: 0,
+            deflate_in: 0,
+            deflate_out: 0,
+            inflated: 0,
+            inflate_in: 0,
+            inflate_out: 0,
+        })
+    };
+}
+
+fn count(f: impl FnOnce(&mut IoCounters)) {
+    IO.with(|cell| {
+        let mut c = cell.get();
+        f(&mut c);
+        cell.set(c);
+    });
+}
+
+/// This thread's totals.
+pub(crate) fn io_counters() -> IoCounters {
+    IO.with(Cell::get)
 }
 
 /// What the driver does after a message.
@@ -130,7 +175,10 @@ fn try_read_tcp(tcp: &TcpStream, buf: &mut Vec<u8>, limit: usize) -> io::Result<
         buf.reserve((limit - buf.len()).clamp(4096, 64 * 1024));
         match tcp.try_read_buf(buf) {
             Ok(0) => return Ok(if any { Read::Data } else { Read::Eof }),
-            Ok(_) => any = true,
+            Ok(n) => {
+                count(|c| c.socket_in += n as u64);
+                any = true;
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 return Ok(if any { Read::Data } else { Read::WouldBlock });
             }
@@ -144,7 +192,10 @@ fn try_write_tcp(tcp: &TcpStream, data: &[u8]) -> io::Result<usize> {
     let mut written = 0;
     while written < data.len() {
         match tcp.try_write(&data[written..]) {
-            Ok(n) => written += n,
+            Ok(n) => {
+                count(|c| c.socket_out += n as u64);
+                written += n;
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) => return Err(e),
         }
@@ -414,6 +465,11 @@ impl OutFrame {
     /// A data message, compressed with `window` bits (RSV1 set).
     fn compressed(opcode: OpCode, message: &[u8], window: u8) -> Self {
         let mut frame = Self::new(opcode, deflate::deflate(message, window));
+        count(|c| {
+            c.deflated += 1;
+            c.deflate_in += message.len() as u64;
+            c.deflate_out += frame.payload.len() as u64;
+        });
         frame.head[0] |= 0x40;
         frame
     }
@@ -513,7 +569,10 @@ impl<'e, E: Endpoint> Conn<'e, E> {
                         }
                     }
                     let mut written = match tcp.try_write_vectored(&slices[..n]) {
-                        Ok(w) => w,
+                        Ok(w) => {
+                            count(|c| c.socket_out += w as u64);
+                            w
+                        }
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
                         Err(e) => return Err(e),
                     };
@@ -639,8 +698,16 @@ impl<'e, E: Endpoint> Conn<'e, E> {
                         };
                         if compressed {
                             // Into the worker's shared inflate buffer.
-                            deflate::inflate(data, self.limits.max_payload, deliver)
-                                .and_then(|result| result)
+                            let compressed_len = data.len() as u64;
+                            deflate::inflate(data, self.limits.max_payload, |message| {
+                                count(|c| {
+                                    c.inflated += 1;
+                                    c.inflate_in += compressed_len;
+                                    c.inflate_out += message.len() as u64;
+                                });
+                                deliver(message)
+                            })
+                            .and_then(|result| result)
                         } else {
                             deliver(data)
                         }

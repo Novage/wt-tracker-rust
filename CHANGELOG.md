@@ -38,7 +38,16 @@ All notable changes to this project are listed here. The format follows
   protocol applied to a shard; run in CI on every pull request and nightly, and on stable over
   the seed corpus by `cargo test`.
 
+- `/stats.json` `traffic`: messages and bytes sent and received per kind, socket bytes, and
+  bytes before / after compression and inflating.
+- First production run at tracker.novage.com.ua (Oracle Ampere A1, 2 cores, real peers): 4× less
+  CPU and 3× less memory than aquatic_ws on the same host and load.
+
 ### Changed
+
+- `compressOutgoingMinSize` now defaults to 1024: outgoing messages of at least 1 KiB (offers)
+  are compressed when the client negotiated permessage-deflate (~25% less egress in production at
+  no measurable CPU); 0 restores the JS behaviour (never).
 
 - WebSocket libraries fastwebsockets and sockudo-ws, used by the first server prototype, were
   replaced by the own implementation (5–9 instead of 63–193 KiB per connection).

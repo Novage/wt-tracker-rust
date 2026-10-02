@@ -5,7 +5,8 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use serde_json::{Map, Value, json};
 
-use crate::worker::{DROPPED_MESSAGES, Worker};
+use crate::worker::{DROPPED_MESSAGES, Received, ShardStats, Worker};
+use crate::ws::driver::IoCounters;
 
 /// Hex of an info_hash like JS `Buffer.from(infoHash, "binary").toString("hex")`: one byte per
 /// character (its low 8 bits).
@@ -14,6 +15,54 @@ fn binary_hex(info_hash: &[u8]) -> String {
         .chars()
         .map(|c| format!("{:02x}", (c as u32) & 0xff))
         .collect()
+}
+
+fn count(c: wt_proto::Count) -> Value {
+    json!({ "messages": c.messages, "bytes": c.bytes })
+}
+
+/// Message and byte totals of all workers (since start).
+fn traffic(per_shard: &[ShardStats]) -> Value {
+    let mut sent = wt_proto::Counters::default();
+    let mut received = Received::default();
+    let mut io = IoCounters::default();
+    for s in per_shard {
+        sent += s.sent;
+        let r = s.received;
+        received.announces += r.announces;
+        received.answers += r.answers;
+        received.stops += r.stops;
+        received.scrapes += r.scrapes;
+        received.invalid += r.invalid;
+        io.socket_in += s.io.socket_in;
+        io.socket_out += s.io.socket_out;
+        io.deflated += s.io.deflated;
+        io.deflate_in += s.io.deflate_in;
+        io.deflate_out += s.io.deflate_out;
+        io.inflated += s.io.inflated;
+        io.inflate_in += s.io.inflate_in;
+        io.inflate_out += s.io.inflate_out;
+    }
+    json!({
+        "sent": {
+            "announceReplies": count(sent.announce_replies),
+            "offers": count(sent.offers),
+            "answers": count(sent.answers),
+            "scrapes": count(sent.scrapes),
+        },
+        "received": {
+            "announces": count(received.announces),
+            "answers": count(received.answers),
+            "stops": count(received.stops),
+            "scrapes": count(received.scrapes),
+            "invalid": count(received.invalid),
+        },
+        "socketBytes": { "in": io.socket_in, "out": io.socket_out },
+        "compression": {
+            "deflated": { "messages": io.deflated, "bytesBefore": io.deflate_in, "bytesAfter": io.deflate_out },
+            "inflated": { "messages": io.inflated, "bytesBefore": io.inflate_in, "bytesAfter": io.inflate_out },
+        },
+    })
 }
 
 pub(crate) async fn json(me: &Rc<Worker>) -> String {
@@ -60,6 +109,7 @@ pub(crate) async fn json(me: &Rc<Worker>) -> String {
                 .collect::<Vec<_>>(),
             "directorySize": me.shared.directory.len(),
         },
+        "traffic": traffic(&per_shard),
         "peersCountPerInfoHashPerTracker": per_tracker,
     })
     .to_string()

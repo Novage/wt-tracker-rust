@@ -17,7 +17,7 @@ use std::fmt;
 use smallvec::SmallVec;
 use wt_core::{ConnId, Request, ScrapeTarget, Shard, TrackerError};
 
-pub use encode::{Batch, Encoder};
+pub use encode::{Batch, Count, Counters, Encoder};
 pub use owned::OwnedMessage;
 #[cfg(feature = "sonic")]
 pub use parse::Sonic;

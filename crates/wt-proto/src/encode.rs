@@ -43,6 +43,53 @@ struct OpenScrape {
     start: usize,
 }
 
+/// Messages and their bytes (JSON text).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Count {
+    pub messages: u64,
+    pub bytes: u64,
+}
+
+impl Count {
+    pub fn add(&mut self, bytes: usize) {
+        self.messages += 1;
+        self.bytes += bytes as u64;
+    }
+}
+
+impl std::ops::AddAssign for Count {
+    fn add_assign(&mut self, other: Self) {
+        self.messages += other.messages;
+        self.bytes += other.bytes;
+    }
+}
+
+/// Everything an [`Encoder`] produced since it was created, per kind of message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counters {
+    pub announce_replies: Count,
+    pub offers: Count,
+    pub answers: Count,
+    pub scrapes: Count,
+}
+
+impl std::ops::AddAssign for Counters {
+    fn add_assign(&mut self, other: Self) {
+        self.announce_replies += other.announce_replies;
+        self.offers += other.offers;
+        self.answers += other.answers;
+        self.scrapes += other.scrapes;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    AnnounceReply,
+    Offer,
+    Answer,
+    Scrape,
+}
+
 /// Collects outgoing messages into one reusable buffer. Call [`Encoder::clear`] after the
 /// messages were sent; buffers keep their capacity, so steady state does not allocate.
 #[derive(Default)]
@@ -53,6 +100,8 @@ pub struct Encoder {
     scrape: Option<OpenScrape>,
     /// Escaped `files` keys of the open scrape (ranges in `buf`), for de-duplication.
     scrape_keys: Vec<(u32, u32)>,
+    /// Not reset by [`Encoder::clear`] / [`Encoder::take`].
+    counters: Counters,
 }
 
 impl Encoder {
@@ -85,6 +134,11 @@ impl Encoder {
         self.buf.len()
     }
 
+    /// Messages and bytes produced since the encoder was created, per kind.
+    pub fn counters(&self) -> Counters {
+        self.counters
+    }
+
     /// Moves the messages out as one shared buffer (no copy of message bytes) and clears the
     /// encoder. Costs one buffer allocation per batch instead of one per message.
     pub fn take(&mut self) -> Batch {
@@ -99,7 +153,15 @@ impl Encoder {
     }
 
     #[inline]
-    fn finish(&mut self, to: ConnId, start: usize) {
+    fn finish(&mut self, to: ConnId, start: usize, kind: Kind) {
+        let bytes = self.buf.len() - start;
+        let c = &mut self.counters;
+        match kind {
+            Kind::AnnounceReply => c.announce_replies.add(bytes),
+            Kind::Offer => c.offers.add(bytes),
+            Kind::Answer => c.answers.add(bytes),
+            Kind::Scrape => c.scrapes.add(bytes),
+        }
         self.messages.push(OutMessage {
             to,
             start: start as u32,
@@ -138,7 +200,7 @@ impl<'a> Outbox<Payload<'a>> for Encoder {
         b.extend_from_slice(b",\"incomplete\":");
         write_u32(b, incomplete);
         b.push(b'}');
-        self.finish(to, start);
+        self.finish(to, start, Kind::AnnounceReply);
     }
 
     fn offer(&mut self, to: ConnId, from_peer_id: &Key, info_hash: &Key, offer: &Payload<'a>) {
@@ -162,7 +224,7 @@ impl<'a> Outbox<Payload<'a>> for Encoder {
             b.extend_from_slice(sdp);
         }
         b.extend_from_slice(b"}}");
-        self.finish(to, start);
+        self.finish(to, start, Kind::Offer);
     }
 
     fn answer(&mut self, to: ConnId, answer: &Payload<'a>) {
@@ -173,7 +235,7 @@ impl<'a> Outbox<Payload<'a>> for Encoder {
         let start = self.buf.len();
         self.buf.extend_from_slice(head);
         self.buf.extend_from_slice(tail);
-        self.finish(to, start);
+        self.finish(to, start, Kind::Answer);
     }
 
     fn scrape_entry(
@@ -219,7 +281,7 @@ impl<'a> Outbox<Payload<'a>> for Encoder {
         self.buf.extend_from_slice(b"}}");
         let open = self.scrape.take().expect("opened above");
         self.scrape_keys.clear();
-        self.finish(open.to, open.start);
+        self.finish(open.to, open.start, Kind::Scrape);
     }
 
     fn peer_removed(&mut self, peer_id: &Key, conn: ConnId) {

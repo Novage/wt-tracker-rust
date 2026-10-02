@@ -371,3 +371,56 @@ async fn a_moved_connection_keeps_compression() {
     assert_eq!(stats["placement"]["remoteRequests"], 0, "{stats}");
     drop((clients, crowd));
 }
+
+/// Default `compressOutgoingMinSize` (1024): offers are compressed, short replies are not;
+/// `/stats.json` `traffic` counts what was sent, received, compressed and inflated.
+#[tokio::test(flavor = "multi_thread")]
+async fn default_compresses_large_outgoing_messages_and_stats_count_traffic() {
+    let server = server("");
+    let addr = server.local_addrs()[0];
+    let sdp = "a=candidate:1 1 udp 2122260223 192.168.1.2 54321 typ host ".repeat(40);
+    blocking(move || {
+        let mut a = Client::open(tcp(addr), Some(OFFER));
+        a.send_compressed(&announce(H, "pa", 0), 1);
+        assert_eq!(a.read_text(), (reply(H, 0, 1), false));
+        let mut b = Client::open(tcp(addr), Some(OFFER));
+        let with_offer = format!(
+            r#"{{"action":"announce","info_hash":"{H}","peer_id":"pb","numwant":5,"offers":[{{"offer":{{"type":"offer","sdp":"{sdp}"}},"offer_id":"o1"}}]}}"#
+        );
+        b.send_compressed(&with_offer, 1);
+        assert_eq!(b.read_text(), (reply(H, 0, 2), false));
+        let (offer, compressed) = a.read_text();
+        assert!(compressed && offer.len() >= 1024 && offer.contains(&sdp));
+        (a, b)
+    })
+    .await;
+    let stats = stats(&server).await;
+    let t = &stats["traffic"];
+    let n = |v: &serde_json::Value| v.as_u64().unwrap();
+    assert_eq!(n(&t["received"]["announces"]["messages"]), 2, "{t}");
+    assert_eq!(n(&t["sent"]["announceReplies"]["messages"]), 2, "{t}");
+    assert_eq!(n(&t["sent"]["offers"]["messages"]), 1, "{t}");
+    assert!(n(&t["sent"]["offers"]["bytes"]) >= 1024, "{t}");
+    let deflated = &t["compression"]["deflated"];
+    assert_eq!(n(&deflated["messages"]), 1, "{t}");
+    assert_eq!(
+        n(&deflated["bytesBefore"]),
+        n(&t["sent"]["offers"]["bytes"]),
+        "{t}"
+    );
+    assert!(
+        n(&deflated["bytesAfter"]) < n(&deflated["bytesBefore"]) / 4,
+        "{t}"
+    );
+    let inflated = &t["compression"]["inflated"];
+    assert_eq!(n(&inflated["messages"]), 2, "{t}");
+    assert_eq!(
+        n(&inflated["bytesAfter"]),
+        n(&t["received"]["announces"]["bytes"]),
+        "{t}"
+    );
+    assert!(
+        n(&t["socketBytes"]["in"]) > 0 && n(&t["socketBytes"]["out"]) > 0,
+        "{t}"
+    );
+}

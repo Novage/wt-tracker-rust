@@ -233,3 +233,64 @@ fn stop_with_unmatchable_ids_is_a_no_op() {
         )],
     );
 }
+
+#[test]
+fn counters_count_messages_and_bytes_per_kind_across_clears() {
+    let mut shard = shard();
+    let mut out = Encoder::new();
+    let frames = [
+        (
+            1,
+            r#"{"action":"announce","info_hash":"h0000000000000000001","peer_id":"pa","numwant":5,"offers":[]}"#,
+        ),
+        (
+            2,
+            r#"{"action":"announce","info_hash":"h0000000000000000001","peer_id":"pb","numwant":5,"offers":[{"offer":{"type":"offer","sdp":"x"},"offer_id":"o1"}]}"#,
+        ),
+        (
+            1,
+            r#"{"action":"announce","info_hash":"h0000000000000000001","peer_id":"pa","to_peer_id":"pb","answer":{"type":"answer","sdp":"y"},"offer_id":"o1"}"#,
+        ),
+        (
+            3,
+            r#"{"action":"scrape","info_hash":"h0000000000000000001"}"#,
+        ),
+    ];
+    let mut bytes = [0u64; 4];
+    for (i, (conn, frame)) in frames.iter().enumerate() {
+        out.clear();
+        wt_proto::handle(&mut shard, 0, ConnId(*conn), frame.as_bytes(), &mut out).unwrap();
+        // Frame 2 produces a reply and an offer; the others one message each.
+        for (_, text) in out.messages() {
+            let kind = match (i, text.windows(7).any(|w| w == b"\"offer\"")) {
+                (1, true) => 1,
+                (2, _) => 2,
+                (3, _) => 3,
+                _ => 0,
+            };
+            bytes[kind] += text.len() as u64;
+        }
+    }
+    let c = out.counters();
+    assert_eq!(
+        [
+            c.announce_replies.messages,
+            c.offers.messages,
+            c.answers.messages,
+            c.scrapes.messages
+        ],
+        [2, 1, 1, 1]
+    );
+    assert_eq!(
+        [
+            c.announce_replies.bytes,
+            c.offers.bytes,
+            c.answers.bytes,
+            c.scrapes.bytes
+        ],
+        bytes
+    );
+    // take() keeps them too.
+    let _ = out.take();
+    assert_eq!(out.counters(), c);
+}

@@ -16,11 +16,12 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::{LocalSet, spawn_local};
 use wt_core::{ConnId, Key, Outbox, Shard};
-use wt_proto::{Batch, Encoder, Message, OwnedMessage, ProtoError};
+use wt_proto::{Batch, Count, Encoder, Message, OwnedMessage, ProtoError};
 
 use crate::conn;
 use crate::placement::{self, Mode};
 use crate::ws::codec::close;
+use crate::ws::driver::{IoCounters, io_counters};
 use crate::{Phase, Shared};
 
 /// Events between workers. Sent in batches (`Vec<Event>`), one channel send per destination per
@@ -61,6 +62,22 @@ pub(crate) struct ShardStats {
     pub remote_requests: u64,
     /// Connections that moved to this worker.
     pub moved_in: u64,
+    /// Messages this shard produced, per kind (JSON bytes before framing and compression).
+    pub sent: wt_proto::Counters,
+    /// Messages received from this worker's connections, per kind.
+    pub received: Received,
+    /// Socket and compression totals of the worker thread.
+    pub io: IoCounters,
+}
+
+/// Messages received (JSON bytes after inflating), per kind; `invalid`: not parsed.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Received {
+    pub announces: Count,
+    pub answers: Count,
+    pub stops: Count,
+    pub scrapes: Count,
+    pub invalid: Count,
 }
 
 /// What became of a message.
@@ -152,6 +169,7 @@ pub(crate) struct Worker {
     local_requests: Cell<u64>,
     remote_requests: Cell<u64>,
     moved_in: Cell<u64>,
+    received: Cell<Received>,
 }
 
 impl Worker {
@@ -172,6 +190,7 @@ impl Worker {
             local_requests: Cell::new(0),
             remote_requests: Cell::new(0),
             moved_in: Cell::new(0),
+            received: Cell::new(Received::default()),
         }
     }
 
@@ -393,7 +412,13 @@ impl Worker {
         conn: ConnId,
         frame: &[u8],
     ) -> Result<Handled, ProtoError> {
-        let message = <wt_proto::DefaultBackend as wt_proto::Backend>::parse(frame)?;
+        let message = match <wt_proto::DefaultBackend as wt_proto::Backend>::parse(frame) {
+            Ok(message) => message,
+            Err(e) => {
+                self.count_received(|r| r.invalid.add(frame.len()));
+                return Err(e);
+            }
+        };
         let first = {
             let mut conns = self.conns.borrow_mut();
             conns
@@ -406,9 +431,25 @@ impl Worker {
                 let me = self.clone();
                 spawn_local(async move { me.scrape(conn, job).await });
             }
+            // Counted by the worker it moves to, which handles it.
             Routed::Move(worker) => return Ok(Handled::Move(worker)),
         }
+        self.count_received(|r| {
+            let kind = match &message {
+                Message::Announce { .. } => &mut r.announces,
+                Message::Answer { .. } => &mut r.answers,
+                Message::Stop { .. } => &mut r.stops,
+                Message::Scrape { .. } => &mut r.scrapes,
+            };
+            kind.add(frame.len());
+        });
         Ok(Handled::Done)
+    }
+
+    fn count_received(&self, f: impl FnOnce(&mut Received)) {
+        let mut received = self.received.get();
+        f(&mut received);
+        self.received.set(received);
     }
 
     /// Routes a parsed message. `first`: the connection's first message.
@@ -573,7 +614,7 @@ impl Worker {
                             let _ = reply.send(scrape_entries(&shard, info_hashes.as_deref()));
                         }
                         Event::Stats { reply } => {
-                            let _ = reply.send(self.shard_stats(&shard));
+                            let _ = reply.send(self.shard_stats(&shard, encoder.counters()));
                         }
                         Event::Adopt(adopt) => {
                             spawn_local(conn::adopted(self.clone(), *adopt));
@@ -624,8 +665,9 @@ impl Worker {
             entries.extend(rx.await.unwrap_or_default());
         }
 
-        let mut encoder = Encoder::new();
-        let out: &mut dyn Outbox<wt_proto::Payload<'_>> = &mut encoder;
+        // The worker's encoder (no await below), so the reply is counted like any other.
+        let mut encoder = self.encoder.borrow_mut();
+        let out: &mut dyn Outbox<wt_proto::Payload<'_>> = &mut *encoder;
         match &info_hashes {
             None => {
                 for e in &entries {
@@ -646,7 +688,9 @@ impl Worker {
             }
         }
         out.scrape_end(conn);
-        self.dispatch(encoder.take());
+        let batch = encoder.take();
+        drop(encoder);
+        self.dispatch(batch);
     }
 
     /// Remembers that `shard` may hold peers of `conn` (on the connection's worker).
@@ -663,7 +707,8 @@ impl Worker {
         }
     }
 
-    fn shard_stats(&self, shard: &Shard) -> ShardStats {
+    /// `sent`: the encoder's counters (it may be borrowed by the caller).
+    fn shard_stats(&self, shard: &Shard, sent: wt_proto::Counters) -> ShardStats {
         ShardStats {
             swarms: shard
                 .swarms()
@@ -672,6 +717,9 @@ impl Worker {
             local_requests: self.local_requests.get(),
             remote_requests: self.remote_requests.get(),
             moved_in: self.moved_in.get(),
+            sent,
+            received: self.received.get(),
+            io: io_counters(),
         }
     }
 
@@ -683,7 +731,7 @@ impl Worker {
         let mut pending = Vec::new();
         for (shard, slot) in per_shard.iter_mut().enumerate() {
             if shard == self.id {
-                *slot = self.shard_stats(&self.shard.borrow());
+                *slot = self.shard_stats(&self.shard.borrow(), self.encoder.borrow().counters());
             } else {
                 let (reply, rx) = oneshot::channel();
                 self.push_remote(shard, Event::Stats { reply });

@@ -79,9 +79,9 @@ pub struct WebSocketsConfig {
     /// compressor) are treated as 1 with a startup warning.
     #[serde(default = "default_compression")]
     pub compression: u32,
-    /// With permessage-deflate negotiated, outgoing messages at least this long are compressed.
-    /// 0 (default) = never (like the JS tracker).
-    #[serde(default)]
+    /// With permessage-deflate negotiated, outgoing messages at least this long are compressed
+    /// (offers; replies and answers are shorter). Default 1024; 0 = never (like the JS tracker).
+    #[serde(default = "default_compress_outgoing_min_size")]
     pub compress_outgoing_min_size: usize,
     /// 0 = no limit.
     #[serde(default)]
@@ -131,6 +131,10 @@ fn default_path() -> String {
 fn default_max_payload() -> usize {
     64 * 1024
 }
+fn default_compress_outgoing_min_size() -> usize {
+    1024
+}
+
 fn default_compression() -> u32 {
     1
 }
