@@ -348,7 +348,10 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   `fuzz/make-seeds.py`) cover every frame kind, compressed and fragmented messages, an upgrade
   with all handled headers, and a swarm with offers, answer, scrape, stop, disconnect and expiry.
   `cargo test` also runs every target on stable over the seeds plus 2000 mutations of them
-  (`wt-server` and `wt-proto` unit tests).
+  (`wt-server` and `wt-proto` unit tests). Last local run (M1, 2026-10-02, nightly 1.101,
+  cargo-fuzz 0.13.2): 60 s per target, 1.19 M inputs in all, no crash, timeout or failed check;
+  coverage (edges) `ws_frames` 774, `deflate_roundtrip` 684, `http_upgrade` 932, `protocol`
+  2527, still growing when the time ran out.
 - `tests/announce.rs` and `tests/simulation.rs` port the JS tests and must keep passing.
 - `tests/behaviour.rs` must have at least one test per rule in §5 and per strategy in §5.2.
 - `tests/model.rs` compares random operation sequences against a naive model, for **every**
@@ -659,6 +662,11 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   (listen backlog 128) a few connects were refused in one manual run. Consider prioritising
   the accept loop or `reusePort` on Linux.
 - TLS / large tests on Linux and Ampere A1 with a separate client machine; `reusePort`.
+- **Observability (planned):** structured logging (today only startup lines; runtime errors,
+  rejected messages and closes pass silently) and possibly a Prometheus endpoint next to
+  `/stats.json`.
+- **Fuzzing, longer (planned):** the targets are libFuzzer / OSS-Fuzz compatible; longer runs
+  than the nightly 20 min per target, e.g. through OSS-Fuzz.
 - Hardening: check the requesting connection on stop; optionally require the answer target to
   share the swarm.
 

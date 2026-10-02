@@ -85,8 +85,15 @@ CI (`.github/workflows/ci.yml`) runs this checklist on every pull request and pu
 (the difftest against `Novage/wt-tracker` at the commit in `WT_TRACKER_REF`), and the Autobahn
 testsuite on pushes to `main`.
 
-Fuzzing (`fuzz/`, needs a nightly toolchain, e.g. via rustup): `cargo +nightly fuzz run
-ws_frames` (also `deflate_roundtrip`, `http_upgrade`, `protocol`). When you change the WebSocket
+Fuzzing (`fuzz/`, needs a nightly toolchain). Setup once, with rustup:
+
+```bash
+rustup toolchain install nightly --profile minimal
+cargo +nightly install cargo-fuzz --locked
+```
+
+Then `cargo +nightly fuzz run ws_frames -- -max_total_time=60` (also `deflate_roundtrip`,
+`http_upgrade`, `protocol`); what it finds stays in `fuzz/corpus/<target>/` (not committed). When you change the WebSocket
 codec, compression, HTTP upgrade or protocol, extend the target in `wt-server/src/fuzz.rs` or
 `wt-proto/src/fuzz.rs` and the seeds in `fuzz/make-seeds.py` (rerun it). A crash input from CI
 becomes a regression test.
