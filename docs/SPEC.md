@@ -308,6 +308,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | Slow receivers | uWS buffers up to its backpressure limit | messages beyond `maxBackpressure` (1 MiB) per connection are dropped | bounded memory |
 | Peer identity | global per tracker (per worker in multi-worker) | per shard | sharding |
 | Stop from another connection | allowed | allowed (parity) | hardening is planned (§12) |
+| SIGTERM / SIGINT | process exits at once, connections dropped | graceful shutdown: close 1001, up to `shutdownTimeout` (§13.6) | deployments (docker stop, systemd) |
 | Answer target not in the same swarm | allowed | allowed (parity) | hardening is planned (§12) |
 
 ## 9. Testing requirements
@@ -411,7 +412,10 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   `compression: 0` → RSV1 frame → 1002; inflated > `maxPayloadLength` → 1009, corrupt → 1007,
   invalid UTF-8 after inflating → 1007; `compressOutgoingMinSize` compresses only messages that
   long and only for clients that negotiated; a 40 KB compressed message in 4 fragments over TLS;
-  connections that move at their first compressed announce keep compression. `wt-proto/tests/owned.rs`:
+  connections that move at their first compressed announce keep compression.
+- `tests/shutdown.rs`: a graceful shutdown closes every connection with 1001 and returns once
+  they are closed, then connects are refused; a zero timeout returns at once with a client that
+  never answers; the `wt-tracker` binary (Unix) closes with 1001 and exits 0 on SIGTERM. `wt-proto/tests/owned.rs`:
   `OwnedMessage` round trip (also across threads) and `Encoder::take`.
 
   Offer receivers are not compared exactly: both sides choose them randomly, and the swarm order
@@ -659,6 +663,7 @@ defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-
 | `reusePort` (new) | false | Linux only: one `SO_REUSEPORT` socket per worker; otherwise one shared socket |
 | `maxBackpressure` (new) | 1 MiB | per-connection queued bytes; further messages to it are dropped (`droppedMessages`) |
 | `indexHtml` (new) | `./index.html` if present | served at `GET /` |
+| `shutdownTimeout` (new) | 5 | seconds a graceful shutdown waits for connections to close (§13.6) |
 
 Unknown fields are ignored. Invalid config (wrong types, both origin lists, half a key pair,
 `workers` out of range, unknown `offerSelection` or `placement`) → error at startup.
@@ -791,6 +796,20 @@ encoded in request order with the first occurrence kept (§7.2), all swarms in s
 per shard]}`. `localRequests` / `remoteRequests`: requests of each worker's connections applied
 to its own shard / sent to another one (scrape gathers not counted); `busy`: 0–1, `content` only. The hex is computed like JS `Buffer.from(infoHash,
 "binary").toString("hex")` (one byte per character).
+
+### 13.6 Shutdown
+
+- The binary handles SIGINT and, on Unix, SIGTERM: the first signal starts a graceful shutdown
+  (`Server::shutdown_gracefully(shutdownTimeout)`), a second one exits at once (exit code 1).
+  After a graceful shutdown the exit code is 0.
+- Graceful shutdown: every worker stops accepting (its listening sockets are closed, so new
+  connects are refused), and every WebSocket gets a close frame with **1001** (Going Away) after
+  the messages already queued for it, then TLS `close_notify` and TCP shutdown (each within the
+  1 s close timeout of §13.2); its peers are removed. A connection that upgrades or moves to a
+  worker during the shutdown is closed the same way at once. A worker stops when it has no
+  WebSocket left or at the deadline (`shutdownTimeout` seconds; 0 = do not wait); connections
+  still open then (and HTTP requests in progress) are dropped.
+- `Server::shutdown` / dropping the `Server`: stop at once (in-process use, tests).
 
 ## 14. Load test (`crates/wt-loadgen`, `loadtest/run.sh`)
 

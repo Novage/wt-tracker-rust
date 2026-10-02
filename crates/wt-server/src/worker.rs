@@ -18,9 +18,10 @@ use tokio::task::{LocalSet, spawn_local};
 use wt_core::{ConnId, Key, Outbox, Shard};
 use wt_proto::{Batch, Encoder, Message, OwnedMessage, ProtoError};
 
-use crate::Shared;
 use crate::conn;
 use crate::placement::{self, Mode};
+use crate::ws::codec::close;
+use crate::{Phase, Shared};
 
 /// Events between workers. Sent in batches (`Vec<Event>`), one channel send per destination per
 /// scheduler tick.
@@ -81,7 +82,8 @@ pub(crate) enum Out {
     Text(Bytes),
     /// Only the echo endpoint sends binary frames.
     Binary(Bytes),
-    Close,
+    /// A close frame with this code, after the frames queued before it.
+    Close(u16),
 }
 
 /// A scrape spanning shards, gathered asynchronously.
@@ -145,6 +147,8 @@ pub(crate) struct Worker {
     flush_scheduled: Cell<bool>,
     start: Instant,
     rng: RefCell<fastrand::Rng>,
+    /// Shutting down: no new connections; new WebSockets are closed at once.
+    draining: Cell<bool>,
     local_requests: Cell<u64>,
     remote_requests: Cell<u64>,
     moved_in: Cell<u64>,
@@ -164,6 +168,7 @@ impl Worker {
             flush_scheduled: Cell::new(false),
             start: Instant::now(),
             rng: RefCell::new(fastrand::Rng::with_seed(seed)),
+            draining: Cell::new(false),
             local_requests: Cell::new(0),
             remote_requests: Cell::new(0),
             moved_in: Cell::new(0),
@@ -300,8 +305,32 @@ impl Worker {
     }
 
     /// Starts closing `conn` once: its peers are removed from every shard it announced to, the
-    /// writer sends a close frame, the reader stops.
+    /// writer sends a close frame (1000), the reader stops.
     pub fn begin_close(self: &Rc<Self>, conn: ConnId) {
+        self.begin_close_with(conn, close::NORMAL);
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining.get()
+    }
+
+    /// Graceful shutdown: every WebSocket of this worker is closed with 1001 after the messages
+    /// already queued for it (spec §13.6).
+    fn drain(self: &Rc<Self>) {
+        self.draining.set(true);
+        let open: Vec<ConnId> = self
+            .conns
+            .borrow()
+            .iter()
+            .map(|(slot, e)| conn_id(self.id, e.generation, slot))
+            .collect();
+        for conn in open {
+            self.begin_close_with(conn, close::GOING_AWAY);
+        }
+    }
+
+    /// [`Self::begin_close`] with a close code.
+    pub fn begin_close_with(self: &Rc<Self>, conn: ConnId, code: u16) {
         let mask = {
             let mut conns = self.conns.borrow_mut();
             let Some(entry) = conns
@@ -311,7 +340,7 @@ impl Worker {
                 return;
             };
             entry.closing = true;
-            entry.queue.push_back(Out::Close);
+            entry.queue.push_back(Out::Close(code));
             entry.notify.notify_one();
             entry.closed.notify_one();
             entry.shard_mask
@@ -745,7 +774,7 @@ pub(crate) fn run(
     shared: Arc<Shared>,
     inbox: mpsc::UnboundedReceiver<Vec<Event>>,
     listeners: Vec<WorkerListener>,
-    mut shutdown: watch::Receiver<bool>,
+    mut phase: watch::Receiver<Phase>,
 ) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -760,11 +789,33 @@ pub(crate) fn run(
         if !me.hashed() {
             spawn_local(me.clone().load_ticker());
         }
-        for listener in listeners {
-            let socket = TcpListener::from_std(listener.socket).expect("listener");
-            spawn_local(conn::accept_loop(me.clone(), listener.index, socket));
+        let accepting: Vec<_> = listeners
+            .into_iter()
+            .map(|listener| {
+                let socket = TcpListener::from_std(listener.socket).expect("listener");
+                spawn_local(conn::accept_loop(me.clone(), listener.index, socket))
+            })
+            .collect();
+        let Ok(Phase::Drain(deadline)) = phase.wait_for(|p| *p != Phase::Running).await.map(|p| *p)
+        else {
+            return;
+        };
+        // Graceful shutdown: stop accepting (closes this worker's listening sockets), close
+        // every WebSocket, wait until they are gone, the deadline, or an immediate stop.
+        for task in &accepting {
+            task.abort();
         }
-        let _ = shutdown.wait_for(|stop| *stop).await;
+        me.drain();
+        let drained = async {
+            while !me.conns.borrow().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            _ = drained => {}
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+            _ = phase.wait_for(|p| *p == Phase::Stop) => {}
+        }
     });
 }
 

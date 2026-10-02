@@ -28,6 +28,9 @@ pub struct Config {
     /// `index.html` served at `/`. Default: `./index.html` if it exists.
     #[serde(default)]
     pub index_html: Option<PathBuf>,
+    /// Seconds a graceful shutdown (SIGTERM / SIGINT) waits for connections to close.
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_timeout: u64,
     /// Which shard owns an info_hash: `content` (default; swarms follow the content and
     /// connections move to them, spec §13.3) or `hash` (`foldhash(info_hash) % workers`).
     #[serde(default)]
@@ -109,6 +112,10 @@ pub struct AccessConfig {
 fn default_servers() -> Vec<ServerItem> {
     vec![ServerItem::default()]
 }
+fn default_shutdown_timeout() -> u64 {
+    5
+}
+
 fn default_max_backpressure() -> usize {
     1 << 20
 }

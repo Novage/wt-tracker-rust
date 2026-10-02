@@ -17,6 +17,7 @@ use std::net::{SocketAddr, TcpListener as StdListener, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -54,11 +55,22 @@ pub(crate) struct ListenerInfo {
     pub web_sockets: AtomicUsize,
 }
 
-/// A running server. Dropping it (or [`Server::shutdown`]) stops all workers.
+/// What the workers should do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Running,
+    /// Graceful shutdown: close every connection, stop when all are gone or at the deadline.
+    Drain(Instant),
+    /// Stop now.
+    Stop,
+}
+
+/// A running server. Dropping it (or [`Server::shutdown`]) stops all workers at once;
+/// [`Server::shutdown_gracefully`] closes the connections first.
 pub struct Server {
     addrs: Vec<SocketAddr>,
     workers: usize,
-    shutdown: watch::Sender<bool>,
+    shutdown: watch::Sender<Phase>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -73,11 +85,21 @@ impl Server {
     }
 
     pub fn shutdown(self) {}
+
+    /// Stops accepting connections, closes every WebSocket with 1001 (Going Away) after the
+    /// messages already queued for it, and returns when all are closed or after `timeout`
+    /// (spec §13.6).
+    pub fn shutdown_gracefully(mut self, timeout: Duration) {
+        let _ = self.shutdown.send(Phase::Drain(Instant::now() + timeout));
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.shutdown.send(true);
+        let _ = self.shutdown.send(Phase::Stop);
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
@@ -168,7 +190,7 @@ pub fn start(config: Config) -> Result<Server, String> {
         loads: placement::Loads::new(workers),
     });
 
-    let (shutdown, shutdown_rx) = watch::channel(false);
+    let (shutdown, shutdown_rx) = watch::channel(Phase::Running);
     let mut threads = Vec::new();
     for (id, inbox) in receivers.into_iter().enumerate() {
         let mut own = Vec::new();

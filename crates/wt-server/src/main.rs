@@ -1,7 +1,8 @@
 //! `wt-tracker [config.json]`: like the JS tracker, reads the given file, or `./config.json` if it
-//! exists, or uses defaults.
+//! exists, or uses defaults. SIGTERM / SIGINT: graceful shutdown (a second one stops at once).
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use wt_server::Config;
 
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
     for warning in config.warnings() {
         eprintln!("warning: {warning}");
     }
+    let timeout = Duration::from_secs(config.shutdown_timeout);
 
     let server = match wt_server::start(config) {
         Ok(server) => server,
@@ -51,7 +53,37 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
         .expect("signal runtime");
-    let _ = runtime.block_on(tokio::signal::ctrl_c());
-    server.shutdown();
-    ExitCode::SUCCESS
+    runtime.block_on(async {
+        signal().await;
+        println!(
+            "shutting down: closing connections (up to {timeout:?}; a second signal stops now)"
+        );
+        let graceful = tokio::task::spawn_blocking(move || server.shutdown_gracefully(timeout));
+        tokio::select! {
+            _ = graceful => {
+                println!("stopped");
+                ExitCode::SUCCESS
+            }
+            _ = signal() => {
+                eprintln!("stopped without waiting for connections");
+                // Not a return: dropping the runtime would wait for the graceful shutdown.
+                std::process::exit(1)
+            }
+        }
+    })
+}
+
+/// SIGINT (Ctrl-C) or, on Unix, SIGTERM (docker stop, systemd).
+async fn signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }

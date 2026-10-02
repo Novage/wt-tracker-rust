@@ -48,7 +48,9 @@ cargo build --release -p wt-server
 ```
 
 Without an argument it reads `./config.json` if present, else listens on `ws://0.0.0.0:8000` with
-the defaults. Clients connect to `ws://host:8000/` (any path by default).
+the defaults. Clients connect to `ws://host:8000/` (any path by default). SIGTERM or Ctrl-C
+closes every connection with 1001 (Going Away) and exits within `shutdownTimeout` seconds; a
+second signal exits at once.
 
 ## Configuration
 
@@ -77,6 +79,7 @@ Settings this server adds (all optional):
 | `reusePort` | `false` | Linux: one `SO_REUSEPORT` listening socket per worker |
 | `maxBackpressure` | 1 MiB | queued outgoing bytes per connection before messages to it are dropped |
 | `indexHtml` | `./index.html` if present | page served at `GET /` |
+| `shutdownTimeout` | `5` | seconds to wait for connections to close on SIGTERM / SIGINT |
 | `websockets.compressOutgoingMinSize` | `0` (never) | with permessage-deflate, compress outgoing messages at least this long |
 | `tracker.offerSelection` | `sample` | how offers pick peers: `sample`, `window` or `round_robin` |
 

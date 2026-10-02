@@ -34,6 +34,8 @@ impl OpCode {
 /// Close status codes we send.
 pub mod close {
     pub const NORMAL: u16 = 1000;
+    /// The server is shutting down.
+    pub const GOING_AWAY: u16 = 1001;
     pub const PROTOCOL_ERROR: u16 = 1002;
     pub const INVALID_DATA: u16 = 1007;
     pub const POLICY: u16 = 1008;

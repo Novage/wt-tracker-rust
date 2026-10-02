@@ -481,7 +481,8 @@ impl<'e, E: Endpoint> Conn<'e, E> {
                     let frame = self.data_frame(OpCode::Binary, m);
                     self.out.push_back(frame);
                 }
-                Pop::Frame(Out::Close) | Pop::Gone => self.closing = Some(close::NORMAL),
+                Pop::Frame(Out::Close(code)) => self.closing = Some(code),
+                Pop::Gone => self.closing = Some(close::NORMAL),
                 Pop::Empty => break,
             }
         }

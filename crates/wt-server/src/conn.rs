@@ -177,6 +177,10 @@ struct TrackerEndpoint {
 impl TrackerEndpoint {
     fn new(me: &Rc<Worker>, placed: bool) -> Self {
         let (conn, notify, closed) = me.register(placed);
+        if me.is_draining() {
+            // Upgraded (or moved here) during a graceful shutdown.
+            me.begin_close_with(conn, close::GOING_AWAY);
+        }
         Self {
             me: me.clone(),
             conn,

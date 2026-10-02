@@ -31,6 +31,9 @@ All notable changes to this project are listed here. The format follows
 - README, LICENSE (Apache-2.0), NOTICE, SECURITY.md, this changelog, CI for pull requests and
   `main`, toolchain pinned to Rust 1.98.1.
 
+- Graceful shutdown on SIGTERM / SIGINT: connections are closed with 1001 (Going Away) and the
+  server waits up to `shutdownTimeout` seconds (default 5); a second signal exits at once.
+
 ### Changed
 
 - WebSocket libraries fastwebsockets and sockudo-ws, used by the first server prototype, were
