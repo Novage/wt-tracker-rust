@@ -505,32 +505,32 @@ overstates because freed pages are retained.
 
 | Scenario | Ops/run | JS ns/op | Rust ns/op | Speedup | Same messages |
 |---|---:|---:|---:|---:|:-:|
-| join_one_swarm | 100,000 | 460.9 | 137.1 | 3.4× | yes |
-| join_many_swarms | 1,000,000 | 773.2 | 220.7 | 3.5× | yes |
-| multi_peer_join | 600,000 | 852.0 | 164.6 | 5.2× | yes |
-| reannounce | 600,000 | 886.6 | 142.4 | 6.2× | yes |
-| answer | 1,000,000 | 318.3 | 76.9 | 4.1× | yes |
-| reannounce_one_swarm | 100,000 | 334.9 | 89.6 | 3.7× | yes |
-| reannounce_window (vs JS reannounce) | 600,000 | 886.6 | 104.5 | 8.5× | n/a |
-| reannounce_one_swarm_window (vs JS reannounce_one_swarm) | 100,000 | 334.9 | 51.0 | 6.6× | n/a |
-| reannounce_round_robin (vs JS reannounce) | 600,000 | 886.6 | 90.9 | 9.8× | n/a |
-| reannounce_one_swarm_round_robin (vs JS reannounce_one_swarm) | 100,000 | 334.9 | 48.2 | 7.0× | n/a |
-| stop_all | 600,000 | 244.6 | 93.9 | 2.6× | yes |
-| disconnect_all | 100,000 | 844.4 | 247.9 | 3.4× | yes |
-| expire_sweep | 600,000 | 104.6 | 26.6 | 3.9× | yes |
-| proto_parse_announce_serde_json (vs JS proto_parse_announce) | 20,000 | 16628.6 | 6913.0 | 2.4× | yes |
-| proto_parse_announce_sonic (vs JS proto_parse_announce) | 20,000 | 16628.6 | 36589.8 | 0.5× | yes |
-| proto_encode_announce | 20,000 | 7595.2 | 1188.8 | 6.4× | yes |
-| pipeline_reannounce_serde_json (vs JS pipeline_reannounce) | 20,000 | 26886.7 | 8354.3 | 3.2× | yes |
-| pipeline_reannounce_sonic (vs JS pipeline_reannounce) | 20,000 | 26886.7 | 37850.6 | 0.7× | yes |
-| pipeline_answer_serde_json (vs JS pipeline_answer) | 20,000 | 3110.5 | 884.1 | 3.5× | yes |
-| pipeline_answer_sonic (vs JS pipeline_answer) | 20,000 | 3110.5 | 1214.5 | 2.6× | yes |
+| join_one_swarm | 100,000 | 545.8 | 144.3 | 3.8× | yes |
+| join_many_swarms | 1,000,000 | 718.2 | 224.6 | 3.2× | yes |
+| multi_peer_join | 600,000 | 779.8 | 166.6 | 4.7× | yes |
+| reannounce | 600,000 | 796.8 | 137.3 | 5.8× | yes |
+| answer | 1,000,000 | 299.7 | 72.6 | 4.1× | yes |
+| reannounce_one_swarm | 100,000 | 273.0 | 103.3 | 2.6× | yes |
+| reannounce_window (vs JS reannounce) | 600,000 | 796.8 | 97.1 | 8.2× | n/a |
+| reannounce_one_swarm_window (vs JS reannounce_one_swarm) | 100,000 | 273.0 | 49.7 | 5.5× | n/a |
+| reannounce_round_robin (vs JS reannounce) | 600,000 | 796.8 | 87.0 | 9.2× | n/a |
+| reannounce_one_swarm_round_robin (vs JS reannounce_one_swarm) | 100,000 | 273.0 | 48.1 | 5.7× | n/a |
+| stop_all | 600,000 | 224.0 | 87.2 | 2.6× | yes |
+| disconnect_all | 100,000 | 801.5 | 233.3 | 3.4× | yes |
+| expire_sweep | 600,000 | 99.2 | 25.2 | 3.9× | yes |
+| proto_parse_announce_serde_json (vs JS proto_parse_announce) | 20,000 | 16411.7 | 6978.9 | 2.4× | yes |
+| proto_parse_announce_sonic (vs JS proto_parse_announce) | 20,000 | 16411.7 | 32381.5 | 0.5× | yes |
+| proto_encode_announce | 20,000 | 7411.4 | 1015.1 | 7.3× | yes |
+| pipeline_reannounce_serde_json (vs JS pipeline_reannounce) | 20,000 | 26540.0 | 8287.2 | 3.2× | yes |
+| pipeline_reannounce_sonic (vs JS pipeline_reannounce) | 20,000 | 26540.0 | 33791.4 | 0.8× | yes |
+| pipeline_answer_serde_json (vs JS pipeline_answer) | 20,000 | 3033.1 | 879.1 | 3.5× | yes |
+| pipeline_answer_sonic (vs JS pipeline_answer) | 20,000 | 3033.1 | 1100.0 | 2.8× | yes |
 
 ### Memory per membership (peer-in-swarm)
 
 | State | Memberships | JS heapUsed B | Rust heap B (incl. Vec slack) | Rust RSS B |
 |---|---:|---:|---:|---:|
-| multi_peer_join | 600,000 | 156.7 | 152.5 | 93.5 |
+| multi_peer_join | 600,000 | 156.7 | 152.5 | 92.4 |
 | join_many_swarms | 1,000,000 | 233.6 | 233.9 | 282.2 |
 
 ### Multi-core scaling (re-announce, M announces/s)
@@ -539,10 +539,10 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
 
 | Threads | JS strong | Rust strong | Rust/JS | JS weak | Rust weak |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 1.77 (1.0×) | 6.56 (1.0×) | 3.7× | 1.69 (1.0×) | 6.34 (1.0×) |
-| 2 | 1.94 (1.1×) | 9.28 (1.4×) | 4.8× | 2.36 (1.4×) | 9.00 (1.4×) |
-| 4 | 3.50 (2.0×) | 17.23 (2.6×) | 4.9× | 3.50 (2.1×) | 13.86 (2.2×) |
-| 8 | 4.41 (2.5×) | 34.57 (5.3×) | 7.8× | 4.61 (2.7×) | 19.05 (3.0×) |
+| 1 | 1.88 (1.0×) | 7.15 (1.0×) | 3.8× | 1.73 (1.0×) | 6.89 (1.0×) |
+| 2 | 2.15 (1.1×) | 9.52 (1.3×) | 4.4× | 2.76 (1.6×) | 9.54 (1.4×) |
+| 4 | 3.34 (1.8×) | 17.34 (2.4×) | 5.2× | 3.71 (2.1×) | 14.58 (2.1×) |
+| 8 | 4.23 (2.3×) | 29.20 (4.1×) | 6.9× | 4.81 (2.8×) | 19.69 (2.9×) |
 
 ### Load test (end to end, `loadtest/run.sh`)
 

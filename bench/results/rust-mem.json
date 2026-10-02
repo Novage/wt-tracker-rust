@@ -6,8 +6,8 @@
       "memberships": 600000,
       "name": "multi_peer_join",
       "peers": 300000,
-      "rss_bytes": 56082432,
-      "rss_bytes_per_membership": 93.47072,
+      "rss_bytes": 55459840,
+      "rss_bytes_per_membership": 92.43306666666666,
       "swarms": 10000
     },
     {
@@ -16,8 +16,8 @@
       "memberships": 1000000,
       "name": "join_many_swarms",
       "peers": 1000000,
-      "rss_bytes": 282198016,
-      "rss_bytes_per_membership": 282.198016,
+      "rss_bytes": 282214400,
+      "rss_bytes_per_membership": 282.2144,
       "swarms": 100000
     }
   ],
