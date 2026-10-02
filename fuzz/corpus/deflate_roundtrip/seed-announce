@@ -1,0 +1,1 @@
+{"action":"announce","info_hash":"hfuzz000000000000001","peer_id":"pa","numwant":10,"offers":[{"offer":{"type":"offer","sdp":"v=0 sdp-pa-0"},"offer_id":"pa-o0"},{"offer":{"type":"offer","sdp":"v=0 sdp-pa-1"},"offer_id":"pa-o1"},{"offer":{"type":"offer","sdp":"v=0 sdp-pa-2"},"offer_id":"pa-o2"},{"offer":{"type":"offer","sdp":"v=0 sdp-pa-3"},"offer_id":"pa-o3"}]}

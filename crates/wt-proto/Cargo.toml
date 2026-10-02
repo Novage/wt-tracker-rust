@@ -9,6 +9,8 @@ license.workspace = true
 [features]
 # SIMD JSON parsing backend (sonic-rs); the serde_json backend is always available.
 sonic = ["dep:sonic-rs"]
+# Fuzz target entry points (`fuzz/`).
+fuzzing = []
 
 [dependencies]
 wt-core = { path = "../wt-core" }

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/wt-core", "crates/wt-proto", "crates/wt-server", "crates/wt-bench", "crates/wt-difftest", "crates/wt-loadgen"]
+# cargo-fuzz targets: a separate workspace, built with nightly (`cargo +nightly fuzz run ...`).
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"

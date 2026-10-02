@@ -42,7 +42,8 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 | `crates/wt-loadgen`, `loadtest/run.sh` | load generator (tokio-tungstenite, or its own client `src/client.rs` for permessage-deflate and wire bytes), wire smoke check, JS vs Rust load test (§14) |
 | `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss, incl. compression (§9) |
 | `loadtest/aquatic.sh`, `loadtest/aquatic/` | load test against aquatic_ws in a Linux container (§14) |
-| `.github/workflows/ci.yml` | CI: the finish checklist on pull requests and `main`, Autobahn on `main` (§9) |
+| `.github/workflows/ci.yml` | CI: the finish checklist and short fuzzing on pull requests and `main`, Autobahn on `main`, nightly long fuzzing (§9) |
+| `fuzz/` | cargo-fuzz targets (separate workspace, nightly); target logic in `wt-server::fuzz` / `wt-proto::fuzz` (feature `fuzzing`); seed corpus from `fuzz/make-seeds.py` (§9) |
 | `README.md`, `CHANGELOG.md`, `SECURITY.md`, `LICENSE`, `NOTICE` | overview, changes, vulnerability reporting, Apache-2.0 |
 | `rust-toolchain.toml` | Rust 1.98.1 (also `rust-version = "1.98"` in `Cargo.toml`) |
 | `crates/wt-core/tests` | ported JS tests, behaviour tests, model-based proptest |
@@ -320,9 +321,34 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   (`check-spec.sh` against the pull request's base or the previous `main`; label
   `spec-unchanged-ok` sets `SPEC_UNCHANGED_OK=1`), job `difftest` (`node difftest/run.ts`, Node
   26, against `Novage/wt-tracker` checked out at `WT_TRACKER_REF` next to this repository, after
-  `npm ci`), and on pushes to `main` / manual runs job `autobahn` (`loadtest/autobahn.sh`,
-  reports uploaded as an artifact). Benchmarks and load tests are not run in CI (they need an
-  idle machine).
+  `npm ci`), job `fuzz` (below), and on pushes to `main`, nightly and manual runs job `autobahn`
+  (`loadtest/autobahn.sh`, reports uploaded as an artifact). Nightly (03:00 UTC, schedule) runs
+  every job. Benchmarks and load tests are not run in CI (they need an idle machine).
+- **Fuzzing** (`fuzz/`, cargo-fuzz / libFuzzer, nightly Rust): every target must not panic for
+  any input, and checks invariants that hold for every input:
+  - `ws_frames`: a client byte stream (deflate on / off, payload limit and read chunk size from
+    the first byte) through `parse_frame`, `Fragments` and `inflate`, fed in chunks like the
+    driver: consumed lengths and payload ranges within the buffer, frames and messages ≤ the
+    limit, control frames final and ≤ 125 bytes, `Incomplete` totals beyond the buffer, RSV1
+    only with deflate, inflated ≤ the limit;
+  - `deflate_roundtrip`: `deflate` then `inflate` returns the message, every window size;
+  - `http_upgrade`: `parse_head`, `upgrade_response` with and without compression,
+    `path_matches`, `negotiate`: a well-formed `101` (every header line `Name: value`, no CR /
+    LF in values, so echoed request values cannot inject headers), the extension header only
+    when negotiated, outgoing windows 9..15 or none;
+  - `protocol`: frames (`0xFF`-separated, connection and kind from the first byte) parsed and
+    applied to a shard with disconnects and expiry, both directly and through
+    `OwnedMessage::copy_from` on a second shard with the same seed: `check_invariants` after
+    every step, identical output on both paths, every outgoing message valid JSON for a known
+    connection.
+
+  CI job `fuzz`: each target 60 s on pull requests and pushes, 20 min nightly (`-timeout=10`,
+  `-rss_limit_mb=4096`), the corpus found so far restored from the Actions cache, crash inputs
+  uploaded as artifacts. Seeds (`fuzz/corpus/<target>/seed-*`, committed, written by
+  `fuzz/make-seeds.py`) cover every frame kind, compressed and fragmented messages, an upgrade
+  with all handled headers, and a swarm with offers, answer, scrape, stop, disconnect and expiry.
+  `cargo test` also runs every target on stable over the seeds plus 2000 mutations of them
+  (`wt-server` and `wt-proto` unit tests).
 - `tests/announce.rs` and `tests/simulation.rs` port the JS tests and must keep passing.
 - `tests/behaviour.rs` must have at least one test per rule in §5 and per strategy in §5.2.
 - `tests/model.rs` compares random operation sequences against a naive model, for **every**

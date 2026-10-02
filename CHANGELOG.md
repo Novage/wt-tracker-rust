@@ -34,6 +34,10 @@ All notable changes to this project are listed here. The format follows
 - Graceful shutdown on SIGTERM / SIGINT: connections are closed with 1001 (Going Away) and the
   server waits up to `shutdownTimeout` seconds (default 5); a second signal exits at once.
 
+- Fuzzing: cargo-fuzz targets for WebSocket frames, permessage-deflate, the HTTP upgrade and the
+  protocol applied to a shard; run in CI on every pull request and nightly, and on stable over
+  the seed corpus by `cargo test`.
+
 ### Changed
 
 - WebSocket libraries fastwebsockets and sockudo-ws, used by the first server prototype, were

@@ -1,0 +1,6 @@
+target
+artifacts
+coverage
+# Corpus entries found by fuzzing (CI caches them); only the seeds are committed.
+corpus/*/*
+!corpus/*/seed-*

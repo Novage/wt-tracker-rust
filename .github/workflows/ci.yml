@@ -1,11 +1,14 @@
-# The finish checklist of AGENTS.md on every pull request and every push to main, plus the
-# Autobahn conformance suite on pushes to main (and on demand).
+# The finish checklist of AGENTS.md on every pull request and every push to main, a short fuzzing
+# run of every fuzz target, plus the Autobahn conformance suite on pushes to main. Nightly
+# (03:00 UTC): everything again, with 20 minutes of fuzzing per target.
 name: CI
 
 on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -74,6 +77,36 @@ jobs:
           rust-src-dir: wt-tracker-rust
       - run: node difftest/run.ts
         working-directory: wt-tracker-rust
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ws_frames, deflate_roundtrip, http_upgrade, protocol]
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-fuzz (libFuzzer coverage instrumentation) needs a nightly compiler.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # The corpus found by earlier runs (the committed seeds are always there).
+      - uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: cargo fuzz run
+        env:
+          SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && 1200 || 60 }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=$SECONDS_PER_TARGET -timeout=10 -rss_limit_mb=4096
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts
 
   autobahn:
     name: Autobahn testsuite

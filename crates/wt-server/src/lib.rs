@@ -5,6 +5,9 @@
 pub mod config;
 mod conn;
 pub mod echo;
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzz;
 mod http;
 pub mod placement;
 mod stats;

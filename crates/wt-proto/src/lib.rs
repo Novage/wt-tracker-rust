@@ -5,6 +5,9 @@
 //! slices of the received frame ([`Payload`]) and are copied verbatim into outgoing messages.
 
 mod encode;
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzz;
 mod json;
 mod owned;
 mod parse;

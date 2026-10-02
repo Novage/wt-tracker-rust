@@ -1,0 +1,11 @@
+GET /announce?x=1 HTTP/1.1
+Host: tracker.example
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+Origin: https://example.com
+Sec-WebSocket-Protocol: chat
+Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=10
+

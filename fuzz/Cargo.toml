@@ -1,0 +1,48 @@
+# cargo-fuzz targets (spec §9). A separate workspace, built with nightly:
+#   cargo +nightly fuzz run ws_frames
+# The target logic lives in wt-server / wt-proto behind the `fuzzing` feature; `cargo test` runs
+# it over the seed corpus (corpus/<target>/seed-*, made by make-seeds.py) on stable too.
+[package]
+name = "wt-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+wt-proto = { path = "../crates/wt-proto", features = ["fuzzing"] }
+wt-server = { path = "../crates/wt-server", features = ["fuzzing"] }
+
+[workspace]
+
+[[bin]]
+name = "ws_frames"
+path = "fuzz_targets/ws_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deflate_roundtrip"
+path = "fuzz_targets/deflate_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_upgrade"
+path = "fuzz_targets/http_upgrade.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol"
+path = "fuzz_targets/protocol.rs"
+test = false
+doc = false
+bench = false

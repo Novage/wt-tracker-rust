@@ -114,7 +114,9 @@ node difftest/run.ts          # needs ../wt-tracker with node_modules
 ./scripts/check-spec.sh
 ```
 
-CI runs these on every pull request and push to `main`, plus the Autobahn testsuite on `main`.
+CI runs these on every pull request and push to `main`, with a short fuzzing run of every fuzz
+target (`fuzz/`, cargo-fuzz on nightly Rust), plus the Autobahn testsuite on `main`; every
+night it runs all of them with 20 minutes of fuzzing per target.
 Benchmarks (`bench/run.sh`) and load tests (`loadtest/run.sh`, `loadtest/aquatic.sh`) are run by
 hand on an idle machine; they regenerate the tables in spec §11.
 
