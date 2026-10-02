@@ -3,6 +3,7 @@ name = "wt-proto"
 version = "0.1.0"
 description = "Zero-copy WebTorrent tracker wire protocol: JSON frames <-> wt-core requests/events"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [features]

@@ -3,6 +3,7 @@ name = "wt-server"
 version = "0.1.0"
 description = "Multi-core WebTorrent tracker server (own WebSocket framing + rustls) on wt-core and wt-proto"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [[bin]]

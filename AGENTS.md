@@ -15,6 +15,8 @@ multi-core operation, zero-copy message handling and fast WebSockets.
 - `docs/SPEC.md`: **the specification and source of truth for behaviour.**
 - `.agents/skills/`: shared agent skills (`SKILL.md` format). `.claude/skills` is a symlink to
   it for Claude Code; keep skills in `.agents/skills/` only.
+- `README.md` (overview, quick start, headline numbers), `CHANGELOG.md`, `SECURITY.md`,
+  `LICENSE` / `NOTICE`, `.github/workflows/ci.yml`, `rust-toolchain.toml` (Rust 1.98.1).
 
 ## Specification rules
 
@@ -77,4 +79,12 @@ node difftest/run.ts          # JS vs Rust differential test (needs ../wt-tracke
 
 `check-spec.sh` fails when code changed but `docs/SPEC.md` did not. If a change truly needs no
 spec update (a pure refactor, a comment, a dependency bump), rerun it with
-`SPEC_UNCHANGED_OK=1` and say why.
+`SPEC_UNCHANGED_OK=1` and say why (in CI: label the pull request `spec-unchanged-ok`).
+
+CI (`.github/workflows/ci.yml`) runs this checklist on every pull request and push to `main`
+(the difftest against `Novage/wt-tracker` at the commit in `WT_TRACKER_REF`), and the Autobahn
+testsuite on pushes to `main`.
+
+Add user-visible changes (behaviour, config, protocol, performance) to `CHANGELOG.md` under
+`Unreleased`. Keep `README.md` in line when the quick start, settings or headline numbers
+change.

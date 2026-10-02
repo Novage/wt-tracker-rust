@@ -1,0 +1,5 @@
+wt-tracker-rust
+Copyright 2026 Novage
+
+This product is a Rust port of wt-tracker (https://github.com/Novage/wt-tracker),
+Copyright Novage, licensed under the Apache License, Version 2.0.

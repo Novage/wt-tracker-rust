@@ -3,6 +3,7 @@ name = "wt-core"
 version = "0.1.0"
 description = "Sans-IO WebTorrent tracker core: peers, swarms, offer routing"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

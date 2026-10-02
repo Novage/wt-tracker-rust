@@ -4,6 +4,7 @@ members = ["crates/wt-core", "crates/wt-proto", "crates/wt-server", "crates/wt-b
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.98"
 license = "Apache-2.0"
 
 [profile.release]

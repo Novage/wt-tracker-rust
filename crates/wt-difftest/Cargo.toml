@@ -3,6 +3,7 @@ name = "wt-difftest"
 version = "0.1.0"
 description = "Runs wire-frame traces through wt-proto + wt-core for differential testing against the JS tracker"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 

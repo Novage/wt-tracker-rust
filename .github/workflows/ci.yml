@@ -1,0 +1,95 @@
+# The finish checklist of AGENTS.md on every pull request and every push to main, plus the
+# Autobahn conformance suite on pushes to main (and on demand).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The JS tracker the differential test compares against (github.com/Novage/wt-tracker).
+  WT_TRACKER_REF: 8ad751c7dae5fffe5b7a671796e18c507282fd25
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Toolchain from rust-toolchain.toml; caches cargo and target/.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  spec:
+    name: spec updated with code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # A pull request labelled `spec-unchanged-ok` may change code without docs/SPEC.md
+      # (a pure refactor, a dependency bump; see AGENTS.md).
+      - name: scripts/check-spec.sh
+        env:
+          SPEC_UNCHANGED_OK: ${{ contains(github.event.pull_request.labels.*.name, 'spec-unchanged-ok') && '1' || '' }}
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base to compare with"; exit 0
+          fi
+          scripts/check-spec.sh "$BASE"
+
+  difftest:
+    name: JS vs Rust differential test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: wt-tracker-rust
+      - uses: actions/checkout@v4
+        with:
+          repository: Novage/wt-tracker
+          ref: ${{ env.WT_TRACKER_REF }}
+          path: wt-tracker
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - run: npm ci
+        working-directory: wt-tracker
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-workspaces: wt-tracker-rust
+          rust-src-dir: wt-tracker-rust
+      - run: node difftest/run.ts
+        working-directory: wt-tracker-rust
+
+  autobahn:
+    name: Autobahn testsuite
+    if: github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - run: loadtest/autobahn.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autobahn-reports
+          path: target/autobahn

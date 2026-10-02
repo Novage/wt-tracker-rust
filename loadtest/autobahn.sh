@@ -44,7 +44,9 @@ for server in "${SERVERS[@]}"; do
   "cases": [${CASE_GROUPS[$g]}], "exclude-cases": [], "exclude-agent-cases": {} }
 EOF
       rm -rf "$OUT/reports-$name"
-      docker run --rm --platform "$PLATFORM" -v "$PWD/$OUT:/out" "$IMAGE" \
+      # --add-host: host.docker.internal on Linux too (Docker Desktop defines it already).
+      docker run --rm --platform "$PLATFORM" --add-host=host.docker.internal:host-gateway \
+        -v "$PWD/$OUT:/out" "$IMAGE" \
         wstest -m fuzzingclient -s "/out/fuzzingclient-$name.json" > "$OUT/wstest-$name.log" 2>&1 \
         || { tail -20 "$OUT/wstest-$name.log"; exit 1; }
       grep -q "failed (User timeout" "$OUT/wstest-$name.log" || break

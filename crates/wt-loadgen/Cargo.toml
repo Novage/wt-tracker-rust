@@ -3,6 +3,7 @@ name = "wt-loadgen"
 version = "0.1.0"
 description = "Tracker-shaped WebSocket load generator and smoke check for wt-tracker servers (JS and Rust)"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 

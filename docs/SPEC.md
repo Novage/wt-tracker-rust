@@ -42,6 +42,9 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 | `crates/wt-loadgen`, `loadtest/run.sh` | load generator (tokio-tungstenite, or its own client `src/client.rs` for permessage-deflate and wire bytes), wire smoke check, JS vs Rust load test (§14) |
 | `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss, incl. compression (§9) |
 | `loadtest/aquatic.sh`, `loadtest/aquatic/` | load test against aquatic_ws in a Linux container (§14) |
+| `.github/workflows/ci.yml` | CI: the finish checklist on pull requests and `main`, Autobahn on `main` (§9) |
+| `README.md`, `CHANGELOG.md`, `SECURITY.md`, `LICENSE`, `NOTICE` | overview, changes, vulnerability reporting, Apache-2.0 |
+| `rust-toolchain.toml` | Rust 1.98.1 (also `rust-version = "1.98"` in `Cargo.toml`) |
 | `crates/wt-core/tests` | ported JS tests, behaviour tests, model-based proptest |
 | `crates/wt-bench` | `wt-bench` (timing + scaling), `wt-bench-mem` (memory) |
 | `crates/wt-difftest`, `difftest/run.ts` | wire-level differential test: same random frame traces through the JS tracker and Rust `wt-proto` + `Shard` |
@@ -310,7 +313,15 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 ## 9. Testing requirements
 
 - `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo fmt --all --check` and `scripts/check-spec.sh` must pass.
+  `cargo fmt --all --check` and `scripts/check-spec.sh` must pass. CI
+  (`.github/workflows/ci.yml`, Ubuntu, toolchain from `rust-toolchain.toml`) runs them on every
+  pull request and push to `main`: job `check` (fmt, clippy, tests), job `spec`
+  (`check-spec.sh` against the pull request's base or the previous `main`; label
+  `spec-unchanged-ok` sets `SPEC_UNCHANGED_OK=1`), job `difftest` (`node difftest/run.ts`, Node
+  26, against `Novage/wt-tracker` checked out at `WT_TRACKER_REF` next to this repository, after
+  `npm ci`), and on pushes to `main` / manual runs job `autobahn` (`loadtest/autobahn.sh`,
+  reports uploaded as an artifact). Benchmarks and load tests are not run in CI (they need an
+  idle machine).
 - `tests/announce.rs` and `tests/simulation.rs` port the JS tests and must keep passing.
 - `tests/behaviour.rs` must have at least one test per rule in §5 and per strategy in §5.2.
 - `tests/model.rs` compares random operation sequences against a naive model, for **every**
