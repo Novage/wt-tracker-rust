@@ -25,9 +25,11 @@ tokio = { version = "1", features = ["rt", "net", "io-util", "time", "sync", "ma
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 papaya = "0.2.5"
 fastrand = "2.5"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 [dev-dependencies]
 futures-util = "0.3"
+miniz_oxide = "0.9.1"
 proptest = "1.11"
 rcgen = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread"] }

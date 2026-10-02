@@ -71,9 +71,15 @@ pub struct WebSocketsConfig {
     /// Seconds without any received frame before the connection is closed (0 = never).
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout: u64,
-    /// Accepted for compatibility; permessage-deflate is not negotiated.
-    #[serde(default)]
+    /// permessage-deflate (spec §13.2): 0 = off; 1 (default, like the JS tracker) = negotiated
+    /// without context takeover, client messages inflated; other values (JS 2 = dedicated
+    /// compressor) are treated as 1 with a startup warning.
+    #[serde(default = "default_compression")]
     pub compression: u32,
+    /// With permessage-deflate negotiated, outgoing messages at least this long are compressed.
+    /// 0 (default) = never (like the JS tracker).
+    #[serde(default)]
+    pub compress_outgoing_min_size: usize,
     /// 0 = no limit.
     #[serde(default)]
     pub max_connections: usize,
@@ -118,6 +124,10 @@ fn default_path() -> String {
 fn default_max_payload() -> usize {
     64 * 1024
 }
+fn default_compression() -> u32 {
+    1
+}
+
 fn default_idle_timeout() -> u64 {
     240
 }
@@ -231,9 +241,10 @@ impl Config {
                     warnings.push(format!("{name}: {field} is not supported and ignored"));
                 }
             }
-            if item.websockets.compression > 0 {
+            if item.websockets.compression > 1 {
                 warnings.push(format!(
-                    "{name}: compression is not supported; permessage-deflate is not negotiated"
+                    "{name}: compression {} is not supported; using 1 (shared, no context takeover)",
+                    item.websockets.compression
                 ));
             }
         }

@@ -45,6 +45,8 @@ pub mod close {
 pub struct Frame {
     pub fin: bool,
     pub opcode: OpCode,
+    /// RSV1 (permessage-deflate): the message this frame starts is compressed.
+    pub compressed: bool,
     pub payload: Range<usize>,
 }
 
@@ -59,19 +61,24 @@ pub enum Parsed {
 }
 
 /// Parses one client frame at the start of `buf` (unmasking its payload in place).
-/// `max_payload`: the largest acceptable frame payload.
-pub fn parse_frame(buf: &mut [u8], max_payload: usize) -> Parsed {
+/// `max_payload`: the largest acceptable frame payload. `deflate`: permessage-deflate was
+/// negotiated, so RSV1 may mark the first frame of a data message as compressed.
+pub fn parse_frame(buf: &mut [u8], max_payload: usize, deflate: bool) -> Parsed {
     if buf.len() < 2 {
         return Parsed::Incomplete(None);
     }
     let (b0, b1) = (buf[0], buf[1]);
-    if b0 & 0x70 != 0 {
-        // RSV bits: no extensions are negotiated.
-        return Parsed::Error(close::PROTOCOL_ERROR);
-    }
     let Some(opcode) = OpCode::from_u8(b0 & 0x0f) else {
         return Parsed::Error(close::PROTOCOL_ERROR);
     };
+    let compressed = b0 & 0x40 != 0;
+    // RSV2 / RSV3: no extension uses them. RSV1: only permessage-deflate, only on the first
+    // frame of a data message (RFC 7692 §6).
+    if b0 & 0x30 != 0
+        || (compressed && (!deflate || opcode.is_control() || opcode == OpCode::Continuation))
+    {
+        return Parsed::Error(close::PROTOCOL_ERROR);
+    }
     let fin = b0 & 0x80 != 0;
     if b1 & 0x80 == 0 {
         // Client frames must be masked.
@@ -113,6 +120,7 @@ pub fn parse_frame(buf: &mut [u8], max_payload: usize) -> Parsed {
         Frame {
             fin,
             opcode,
+            compressed,
             payload: start..total,
         },
         total,
@@ -176,13 +184,15 @@ pub fn close_code(payload: &[u8]) -> Result<Option<u16>, u16> {
 #[derive(Default)]
 pub struct Fragments {
     opcode: Option<OpCode>,
+    compressed: bool,
     data: Vec<u8>,
 }
 
 /// What a data frame means for the current message.
 pub enum Data<'a> {
-    /// A complete message: `(text, payload)`, borrowed from the frame or the reassembled data.
-    Message(bool, &'a [u8]),
+    /// A complete message: `(text, compressed, payload)`, borrowed from the frame or the
+    /// reassembled data.
+    Message(bool, bool, &'a [u8]),
     /// A fragment was buffered; the message is not complete yet.
     Partial,
 }
@@ -201,11 +211,14 @@ impl Fragments {
         max_message: usize,
     ) -> Result<Data<'a>, u16> {
         match (frame.opcode, self.opcode) {
-            (OpCode::Text | OpCode::Binary, None) if frame.fin => {
-                Ok(Data::Message(frame.opcode == OpCode::Text, payload))
-            }
+            (OpCode::Text | OpCode::Binary, None) if frame.fin => Ok(Data::Message(
+                frame.opcode == OpCode::Text,
+                frame.compressed,
+                payload,
+            )),
             (OpCode::Text | OpCode::Binary, None) => {
                 self.opcode = Some(frame.opcode);
+                self.compressed = frame.compressed;
                 self.data.extend_from_slice(payload);
                 Ok(Data::Partial)
             }
@@ -218,7 +231,11 @@ impl Fragments {
                     return Ok(Data::Partial);
                 }
                 self.opcode = None;
-                Ok(Data::Message(opcode == OpCode::Text, &self.data))
+                Ok(Data::Message(
+                    opcode == OpCode::Text,
+                    self.compressed,
+                    &self.data,
+                ))
             }
             // A new data message inside a fragmented one, or a continuation of nothing.
             _ => Err(close::PROTOCOL_ERROR),
@@ -262,7 +279,7 @@ mod tests {
         let mut buf = vec![
             0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
         ];
-        match parse_frame(&mut buf, 1000) {
+        match parse_frame(&mut buf, 1000, false) {
             Parsed::Frame(f, 11) => {
                 assert!(f.fin);
                 assert_eq!(f.opcode, OpCode::Text);
@@ -282,14 +299,17 @@ mod tests {
                 if cut < frame.len() {
                     let mut part = frame[..cut].to_vec();
                     assert!(
-                        matches!(parse_frame(&mut part, 1 << 20), Parsed::Incomplete(_)),
+                        matches!(
+                            parse_frame(&mut part, 1 << 20, false),
+                            Parsed::Incomplete(_)
+                        ),
                         "len {len} cut {cut}"
                     );
                 }
             }
             let mut buf = frame.clone();
             buf.extend_from_slice(b"next");
-            match parse_frame(&mut buf, 1 << 20) {
+            match parse_frame(&mut buf, 1 << 20, false) {
                 Parsed::Frame(f, used) => {
                     assert_eq!(used, frame.len());
                     assert_eq!(&buf[f.payload], &payload[..], "len {len}");
@@ -304,7 +324,7 @@ mod tests {
         let frame = client_frame(true, 1, &[b'x'; 300], [1, 2, 3, 4]);
         let mut part = frame[..10].to_vec();
         assert_eq!(
-            parse_frame(&mut part, 1000),
+            parse_frame(&mut part, 1000, false),
             Parsed::Incomplete(Some(frame.len()))
         );
     }
@@ -327,13 +347,77 @@ mod tests {
             ("fragmented ping", &mut fragmented_ping),
         ] {
             assert_eq!(
-                parse_frame(buf, 1000),
+                parse_frame(buf, 1000, false),
                 Parsed::Error(close::PROTOCOL_ERROR),
                 "{name}"
             );
         }
         let mut big = client_frame(true, 1, &[0; 1001], [1, 2, 3, 4]);
-        assert_eq!(parse_frame(&mut big, 1000), Parsed::Error(close::TOO_BIG));
+        assert_eq!(
+            parse_frame(&mut big, 1000, false),
+            Parsed::Error(close::TOO_BIG)
+        );
+    }
+
+    #[test]
+    fn rsv1_only_with_deflate_and_only_on_a_first_data_frame() {
+        let with = |mut f: Vec<u8>, bits: u8| {
+            f[0] |= bits;
+            f
+        };
+        let text = client_frame(false, 1, b"x", [1, 2, 3, 4]);
+        // Negotiated: a compressed first frame (text or binary) is fine.
+        for first in [
+            with(text.clone(), 0x40),
+            with(client_frame(true, 2, b"x", [1; 4]), 0x40),
+        ] {
+            match parse_frame(&mut first.clone(), 1000, true) {
+                Parsed::Frame(f, _) => assert!(f.compressed),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(
+                parse_frame(&mut first.clone(), 1000, false),
+                Parsed::Error(close::PROTOCOL_ERROR)
+            );
+        }
+        for (name, bad) in [
+            (
+                "continuation",
+                with(client_frame(true, 0, b"x", [1; 4]), 0x40),
+            ),
+            ("ping", with(client_frame(true, 9, b"x", [1; 4]), 0x40)),
+            (
+                "close",
+                with(client_frame(true, 8, &[3, 232], [1; 4]), 0x40),
+            ),
+            ("rsv2", with(text.clone(), 0x20)),
+            ("rsv3", with(text.clone(), 0x10)),
+        ] {
+            assert_eq!(
+                parse_frame(&mut bad.clone(), 1000, true),
+                Parsed::Error(close::PROTOCOL_ERROR),
+                "{name}"
+            );
+        }
+        // The flag of the first frame is the message's.
+        let mut f = Fragments::default();
+        let first = Frame {
+            fin: false,
+            opcode: OpCode::Text,
+            compressed: true,
+            payload: 0..0,
+        };
+        let last = Frame {
+            fin: true,
+            opcode: OpCode::Continuation,
+            compressed: false,
+            payload: 0..0,
+        };
+        assert!(matches!(f.push(&first, b"a", 100), Ok(Data::Partial)));
+        assert!(matches!(
+            f.push(&last, b"b", 100),
+            Ok(Data::Message(true, true, b"ab"))
+        ));
     }
 
     #[test]
@@ -342,6 +426,7 @@ mod tests {
         let frame = |fin, opcode| Frame {
             fin,
             opcode,
+            compressed: false,
             payload: 0..0,
         };
         assert!(matches!(
@@ -353,7 +438,7 @@ mod tests {
             Ok(Data::Partial)
         ));
         match f.push(&frame(true, OpCode::Continuation), b"o", 100) {
-            Ok(Data::Message(true, m)) => assert_eq!(m, b"hello"),
+            Ok(Data::Message(true, false, m)) => assert_eq!(m, b"hello"),
             _ => panic!(),
         }
         f.reset();
@@ -529,7 +614,7 @@ mod tests {
                     at += n;
                     let mut pos = 0;
                     loop {
-                        match parse_frame(&mut buf[pos..], 1 << 20) {
+                        match parse_frame(&mut buf[pos..], 1 << 20, false) {
                             Parsed::Frame(frame, used) => {
                                 let payload = pos + frame.payload.start..pos + frame.payload.end;
                                 pos += used;
@@ -538,7 +623,7 @@ mod tests {
                                     continue;
                                 }
                                 match fragments.push(&frame, &buf[payload], 1 << 20) {
-                                    Ok(Data::Message(text, data)) => got.push((text, data.to_vec())),
+                                    Ok(Data::Message(text, _, data)) => got.push((text, data.to_vec())),
                                     Ok(Data::Partial) => {}
                                     Err(code) => prop_assert!(false, "close {}", code),
                                 }

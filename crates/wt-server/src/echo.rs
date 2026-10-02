@@ -64,9 +64,10 @@ async fn serve(tcp: TcpStream, tls: Option<Arc<ServerConfig>>) {
     let Ok((head, rest)) = io.read_head().await else {
         return;
     };
-    let response = match head
+    // Compression on, both directions, so Autobahn's 12.* / 13.* cases cover inflate and deflate.
+    let (response, deflate) = match head
         .upgrade_websocket
-        .then(|| http::upgrade_response(&head))
+        .then(|| http::upgrade_response(&head, true))
     {
         Some(Ok(response)) => response,
         _ => {
@@ -82,9 +83,10 @@ async fn serve(tcp: TcpStream, tls: Option<Arc<ServerConfig>>) {
     let limits = Limits {
         max_payload: 64 << 20,
         idle: Duration::ZERO,
+        compress_min: 1,
     };
     // Echo never detaches.
-    let _ = driver::run(io, rest, limits, &Echo::default()).await;
+    let _ = driver::run(io, rest, limits, deflate, &Echo::default()).await;
 }
 
 /// Serves until the process ends. `tls`: PEM certificate chain and key files.

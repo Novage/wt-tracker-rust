@@ -1606,6 +1606,7 @@ dependencies = [
 name = "wt-loadgen"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "futures-util",
  "hdrhistogram",
  "rcgen",
@@ -1636,9 +1637,11 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "fastrand",
+ "flate2",
  "foldhash",
  "futures-util",
  "httparse",
+ "miniz_oxide",
  "papaya",
  "proptest",
  "rcgen",

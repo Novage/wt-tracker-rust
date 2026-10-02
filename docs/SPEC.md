@@ -38,9 +38,9 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 |---|---|
 | `crates/wt-core` | `Shard`, `Key`, `Request`, `Outbox`, `Settings` |
 | `crates/wt-proto` | wire protocol: `handle`, parser backends, `Encoder` (§7) |
-| `crates/wt-server` | the server, binary `wt-tracker` (§13); `src/ws/` own WebSocket framing (`codec`) and connection driver (`driver`); `placement` info_hash directory, worker loads and placement choices (§13.3); `echo` + `examples/ws-echo.rs` echo server for conformance testing |
-| `crates/wt-loadgen`, `loadtest/run.sh` | load generator, wire smoke check, JS vs Rust load test (§14) |
-| `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss (§9) |
+| `crates/wt-server` | the server, binary `wt-tracker` (§13); `src/ws/` own WebSocket framing (`codec`), permessage-deflate (`deflate`) and connection driver (`driver`); `placement` info_hash directory, worker loads and placement choices (§13.3); `echo` + `examples/ws-echo.rs` echo server for conformance testing |
+| `crates/wt-loadgen`, `loadtest/run.sh` | load generator (tokio-tungstenite, or its own client `src/client.rs` for permessage-deflate and wire bytes), wire smoke check, JS vs Rust load test (§14) |
+| `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss, incl. compression (§9) |
 | `loadtest/aquatic.sh`, `loadtest/aquatic/` | load test against aquatic_ws in a Linux container (§14) |
 | `crates/wt-core/tests` | ported JS tests, behaviour tests, model-based proptest |
 | `crates/wt-bench` | `wt-bench` (timing + scaling), `wt-bench-mem` (memory) |
@@ -293,7 +293,12 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | `to_peer_id` key spelled with escapes | removed | `BadField("to_peer_id")` | never produced by `JSON.stringify` |
 | Integer-like member names (`"1"`) | reordered first when re-serialized | order preserved | JS object key order quirk |
 | Frame `null` | **uncaught `TypeError`** in the message handler (`null.action`) — a crash path | `NotAnObject` → close | JS bug |
-| permessage-deflate (`compression` > 0) | negotiated by uWebSockets | not negotiated (warning at startup) | not implemented in the own framing |
+| permessage-deflate, `compression: 1` (both defaults) | `permessage-deflate; client_no_context_takeover; server_no_context_takeover`, client messages inflated, replies never compressed (`send(msg, false, false)`) | the same (header compared by the smoke check) | parity |
+| `compression` > 1 (dedicated compressor) | per-connection compressor | treated as 1 (warning at startup) | no per-connection zlib state |
+| Offer with `server_max_window_bits=N` | accepted without echoing it (RFC 7692 §7.1.2.1 requires the echo) | `; server_max_window_bits=N` echoed | RFC |
+| `x-webkit-deflate-frame` (old Safari) | negotiated | not negotiated | obsolete |
+| Compressed outgoing messages | never | opt-in: `compressOutgoingMinSize` | extension |
+| Inflated message > `maxPayloadLength` / corrupt | connection closed | close 1009 / 1007 | |
 | Answer without a string `info_hash`, several workers | single tracker: delivered; multi-worker: error | 1 worker: delivered; > 1: `BadField("info_hash")` → close | cannot be routed to a shard |
 | Answer target only in a swarm of another shard | delivered (one global peer table) | `UnknownPeer` → close | per-shard peer tables; real answers target a member of the same swarm |
 | `/stats.json` `memory` | `process.memoryUsage()` | `{ "rss": bytes }`; extra `workers`, `droppedMessages`, `placement` | |
@@ -372,12 +377,30 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   at a time, 200 frames in one write, a 60 KB message over TLS records, the client's Finished and
   HTTP request in one TLS flight.
 - **Autobahn testsuite** (`loadtest/autobahn.sh`, docker image `crossbario/autobahn-testsuite`,
-  fuzzing client against the `ws-echo` example over ws and wss; compression cases 12.* / 13.*
-  excluded): no case may be FAILED; reports in `target/autobahn/reports`. Last result (M1,
-  2026-10-02): 301 cases each over ws and wss — 287 OK, 11 NON-STRICT (3.2, 3.3, 4.1.3, 4.1.4,
-  4.2.3, 4.2.4, 5.15, 6.4.1–6.4.4: invalid UTF-8 detected when a fragmented message completes,
-  not at the first bad fragment; a ping queued before an invalid frame is still answered),
-  3 INFORMATIONAL, 0 FAILED. `wt-proto/tests/owned.rs`:
+  fuzzing client against the `ws-echo` example over ws and wss, including the permessage-deflate
+  cases 12.* / 13.*; the echo server negotiates compression and compresses every reply): no case
+  may be FAILED. The cases run per server in groups (1–7, 9–10, 12, 13); a group whose run lost a
+  connection through Docker Desktop's `host.docker.internal` (wstest then skips the rest of the
+  run) is run again, up to 3 attempts. Reports in `target/autobahn/reports-<server>-<group>`,
+  merged into `target/autobahn/merged.json`. Last result (M1, 2026-10-02):
+  517 cases each over ws and wss — 503 OK, 11 NON-STRICT (3.2, 3.3, 4.1.3, 4.1.4, 4.2.3, 4.2.4,
+  5.15, 6.4.1–6.4.4: invalid UTF-8 detected when a fragmented message completes, not at the
+  first bad fragment; a ping queued before an invalid frame is still answered), 3 INFORMATIONAL,
+  0 FAILED.
+- permessage-deflate: `ws/deflate.rs` unit tests (negotiation table: Chrome / Firefox offers,
+  `server_max_window_bits` echo, 8 → no outgoing compression, unknown / repeated / bad
+  parameters declined, the next offer tried, x-webkit declined; RFC 7692 §7.2.3 example frames;
+  inflate limit → 1009, corrupt → 1007, the inflater reset after errors; deflate round trip for
+  every window size, checked with miniz_oxide) and a property test: random messages compressed
+  by miniz_oxide (final-block streams, every level) inflate to the original and fail above the
+  limit. `codec.rs`: RSV1 only when negotiated and only on a first data frame (not on
+  continuation or control frames; RSV2 / RSV3 never). `tests/compression.rs` (blocking raw
+  client, plain and rustls): the negotiated header, compressed single and fragmented announces,
+  uncompressed replies by default, no extension without an offer or for an unacceptable one;
+  `compression: 0` → RSV1 frame → 1002; inflated > `maxPayloadLength` → 1009, corrupt → 1007,
+  invalid UTF-8 after inflating → 1007; `compressOutgoingMinSize` compresses only messages that
+  long and only for clients that negotiated; a 40 KB compressed message in 4 fragments over TLS;
+  connections that move at their first compressed announce keep compression. `wt-proto/tests/owned.rs`:
   `OwnedMessage` round trip (also across threads) and `Encoder::take`.
 
   Offer receivers are not compared exactly: both sides choose them randomly, and the swarm order
@@ -474,55 +497,60 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
 ### Load test (end to end, `loadtest/run.sh`)
 
 - {"cpu":"Apple M1","cores":8,"os":"darwin 27.0.0","node":"v26.3.0"}; client and server on the same machine.
-- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. JS with `compression: 0` (Rust does not negotiate permessage-deflate). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers, `rust-n-hash` = all-core workers with `placement: "hash"`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Local % = requests applied on the connection's own worker (Rust).
+- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. Servers with `compression: 0` except in the deflate profile (the tungstenite client does not offer permessage-deflate anyway). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers, `rust-n-hash` = all-core workers with `placement: "hash"`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Profile deflate: like light, but clients offer permessage-deflate and compress everything they send; servers with `compression: 1` (`rust-n-out`: also compressing outgoing messages ≥ 1 KiB; `rust-n-off`: `compression: 0`, the uncompressed baseline). Wire = bytes on the client sockets (own client, deflate profile only). Local % = requests applied on the connection's own worker (Rust).
 - Wire smoke check (same messages from JS and Rust): **yes**.
 
-| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| light js ws | 3000 (3000) | 5 s | 0 | 19,219 | 0.37 | 19.0 | 69.5 | 23.7 | 0.46 / 7.02 | – |
-| light js wss | 3000 (3000) | 5 s | 0 | 19,205 | 0.36 | 18.6 | 74.3 | 25.3 | 0.49 / 2.80 | – |
-| light js-workers ws | 3000 (3000) | 5 s | 0 | 19,209 | 0.70 | 36.6 | 166.7 | 56.9 | 0.47 / 2.21 | – |
-| light js-workers wss | 3000 (2982) | 5 s | 18 | 19,092 | 0.73 | 38.1 | 181.0 | 62.1 | 0.49 / 5.57 | – |
-| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,209 | 0.23 | 11.8 | 14.9 | 5.1 | 0.25 / 1.61 | 100.0 |
-| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,211 | 0.26 | 13.8 | 23.5 | 8.0 | 0.28 / 2.41 | 100.0 |
-| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,211 | 0.25 | 12.8 | 14.8 | 5.1 | 0.25 / 1.34 | 100.0 |
-| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,214 | 0.33 | 17.0 | 26.6 | 9.1 | 0.33 / 2.71 | 100.0 |
-| light rust-n-hash ws | 3000 (3000) | 5 s | 0 | 19,211 | 0.44 | 23.0 | 16.2 | 5.5 | 0.44 / 2.54 | 16.9 |
-| light rust-n-hash wss | 3000 (3000) | 5 s | 0 | 19,216 | 0.35 | 18.0 | 26.6 | 9.1 | 0.39 / 271.62 | 10.8 |
-| heavy js ws | 4000 (4000) | 1 s | 0 | 123,217 | 0.68 | 5.5 | 50.4 | 12.9 | 0.67 / 412.67 | – |
-| heavy js-workers ws | 4000 (3856) | 1 s | 3572 | 60,680 | 0.86 | 14.1 | 214.9 | 57.1 | 388.86 / 3706.88 | – |
-| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 128,724 | 0.52 | 4.0 | 55.3 | 14.2 | 0.29 / 32.24 | 100.0 |
-| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,074 | 0.65 | 5.1 | 23.8 | 6.1 | 0.29 / 1.84 | 100.0 |
-| heavy rust-n-hash ws | 4000 (4000) | 1 s | 0 | 128,073 | 1.36 | 10.6 | 36.1 | 9.2 | 0.49 / 2.90 | 15.1 |
-| media js ws | 3000 (3000) | 5 s | 0 | 46,631 | 0.50 | 10.8 | 70.5 | 24.1 | 0.64 / 3.14 | – |
-| media js-workers ws | 3000 (2926) | 5 s | 74 | 45,426 | 0.87 | 19.1 | 178.0 | 62.3 | 0.64 / 37.53 | – |
-| media rust-1 ws | 3000 (3000) | 5 s | 0 | 46,562 | 0.36 | 7.8 | 20.0 | 6.8 | 0.42 / 2.11 | 100.0 |
-| media rust-n ws | 3000 (3000) | 5 s | 0 | 46,644 | 0.47 | 10.1 | 20.1 | 6.9 | 0.37 / 2.25 | 100.0 |
-| media rust-n-hash ws | 3000 (3000) | 5 s | 0 | 46,632 | 0.80 | 17.1 | 31.9 | 10.9 | 0.48 / 39.74 | 12.3 |
+| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % | Wire KiB/s server out / in |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| light js ws | 3000 (3000) | 5 s | 0 | 19,206 | 0.33 | 17.0 | 79.5 (94.2) | 27.1 (0.0) | 0.47 / 2.38 | – | – |
+| light js wss | 3000 (3000) | 5 s | 0 | 19,209 | 0.35 | 18.1 | 74.9 (93.2) | 25.6 (0.0) | 0.50 / 1.81 | – | – |
+| light js-workers ws | 3000 (2958) | 5 s | 42 | 18,937 | 0.56 | 29.4 | 187.2 (207.4) | 64.8 (0.0) | 0.36 / 1.25 | – | – |
+| light js-workers wss | 3000 (2897) | 5 s | 103 | 18,546 | 0.55 | 29.9 | 176.9 (211.0) | 62.5 (0.0) | 0.39 / 2.62 | – | – |
+| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,206 | 0.21 | 10.8 | 16.3 (3.1) | 5.6 (4.5) | 0.23 / 1.27 | 100.0 | – |
+| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,217 | 0.32 | 16.7 | 27.2 (3.1) | 9.3 (8.2) | 0.33 / 1.73 | 100.0 | – |
+| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,216 | 0.23 | 12.2 | 17.9 (3.6) | 6.1 (4.9) | 0.25 / 16.80 | 100.0 | – |
+| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,213 | 0.27 | 13.9 | 27.7 (3.6) | 9.4 (8.2) | 0.27 / 1.40 | 100.0 | – |
+| light rust-n-hash ws | 3000 (3000) | 5 s | 0 | 19,210 | 0.45 | 23.4 | 19.3 (3.6) | 6.6 (5.4) | 0.39 / 1.60 | 11.5 | – |
+| light rust-n-hash wss | 3000 (3000) | 5 s | 0 | 19,211 | 0.45 | 23.2 | 37.9 (3.6) | 12.9 (11.7) | 0.40 / 1.55 | 11.1 | – |
+| heavy js ws | 4000 (4000) | 1 s | 0 | 128,040 | 0.68 | 5.3 | 74.5 (94.5) | 19.1 (0.0) | 0.51 / 1.48 | – | – |
+| heavy js-workers ws | 4000 (3956) | 1 s | 44 | 126,185 | 1.23 | 9.7 | 342.3 (207.6) | 88.6 (34.9) | 280.06 / 737.28 | – | – |
+| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 128,050 | 0.55 | 4.3 | 26.3 (3.1) | 6.7 (5.9) | 0.32 / 1.55 | 100.0 | – |
+| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,085 | 0.70 | 5.4 | 28.4 (3.6) | 7.3 (6.4) | 0.30 / 1.69 | 100.0 | – |
+| heavy rust-n-hash ws | 4000 (4000) | 1 s | 0 | 128,100 | 1.54 | 12.0 | 29.6 (3.6) | 7.6 (6.7) | 0.50 / 2.01 | 12.1 | – |
+| media js ws | 3000 (3000) | 5 s | 0 | 46,631 | 0.54 | 11.6 | 100.0 (94.0) | 34.1 (2.0) | 0.67 / 2.15 | – | – |
+| media js-workers ws | 3000 (2984) | 5 s | 16 | 46,362 | 0.91 | 19.6 | 289.8 (189.0) | 99.4 (34.6) | 0.63 / 2.04 | – | – |
+| media rust-1 ws | 3000 (3000) | 5 s | 0 | 46,630 | 0.42 | 9.1 | 22.7 (3.1) | 7.7 (6.7) | 0.36 / 2.06 | 100.0 | – |
+| media rust-n ws | 3000 (3000) | 5 s | 0 | 46,619 | 0.38 | 8.1 | 20.9 (3.6) | 7.1 (5.9) | 0.29 / 2.75 | 100.0 | – |
+| media rust-n-hash ws | 3000 (3000) | 5 s | 41 | 43,895 | 0.39 | 8.9 | 70.1 (3.6) | 23.9 (22.7) | 12.25 / 972.80 | 13.7 | – |
+| deflate js ws | 3000 (3000) | 5 s | 0 | 19,272 | 0.29 | 14.9 | 22.4 (93.9) | 7.7 (0.0) | 0.62 / 32.38 | – | 18,168 / 4,683 |
+| deflate rust-1 ws | 3000 (3000) | 5 s | 0 | 19,208 | 0.25 | 13.2 | 14.8 (3.1) | 5.0 (4.0) | 0.28 / 1.48 | 100.0 | 18,091 / 4,674 |
+| deflate rust-n ws | 3000 (3000) | 5 s | 0 | 19,207 | 0.24 | 12.4 | 15.2 (3.6) | 5.2 (4.0) | 0.24 / 1.25 | 100.0 | 18,090 / 4,674 |
+| deflate rust-n-off ws | 3000 (3000) | 5 s | 0 | 19,215 | 0.22 | 11.4 | 15.0 (3.6) | 5.1 (3.9) | 0.25 / 1.49 | 100.0 | 18,097 / 17,809 |
+| deflate rust-n-out ws | 3000 (3000) | 5 s | 0 | 19,205 | 0.38 | 19.8 | 18.3 (3.6) | 6.3 (5.0) | 0.23 / 1.78 | 100.0 | 10,416 / 4,674 |
 
 ### Load test vs aquatic_ws (Linux container, `loadtest/aquatic.sh`)
 
 - {"where":"Docker Desktop Linux VM","cores":8,"kernel":"Linux 7.0.14-linuxkit aarch64","aquatic_rev":"a2ddc4b323c5aaf844ce32b655b0ffc8c4836cde"}; server and load generator in one container, sharing its CPUs. Same profiles and load generator as above.
 - `aquatic-1` = 1 socket + 1 swarm worker (2 threads), `aquatic-n` = all cores split ¾ socket / ¼ swarm workers (io_uring, glommio, async-tungstenite, mimalloc); `rust-1` / `rust-n` = 1 / all-core workers (`rust-n` with `reusePort`, `content` placement).
 
-| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| light aquatic-1 ws | 3000 (3000) | 5 s | 0 | 25,198 | 0.66 | 26.2 | 266.9 (45.5) | 91.1 (75.6) | 0.69 / 1.68 | – |
-| light aquatic-1 wss | 3000 (3000) | 5 s | 0 | 25,203 | 0.66 | 26.3 | 293.8 (46.5) | 100.3 (84.4) | 0.70 / 1.73 | – |
-| light aquatic-n ws | 3000 (3000) | 5 s | 0 | 25,203 | 1.96 | 77.7 | 394.0 (162.1) | 134.5 (79.2) | 0.68 / 3.83 | – |
-| light aquatic-n wss | 3000 (3000) | 5 s | 0 | 25,200 | 1.96 | 77.9 | 415.2 (161.1) | 141.7 (86.8) | 0.64 / 7.73 | – |
-| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,200 | 0.30 | 15.9 | 14.5 (2.8) | 4.9 (4.0) | 0.30 / 1.11 | 100.0 |
-| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,201 | 0.36 | 18.9 | 45.3 (3.4) | 15.5 (14.3) | 0.37 / 1.22 | 100.0 |
-| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,201 | 0.36 | 18.5 | 17.4 (3.1) | 5.9 (4.9) | 0.33 / 1.17 | 100.0 |
-| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,203 | 0.41 | 21.2 | 34.5 (3.7) | 11.8 (10.5) | 0.35 / 1.26 | 100.0 |
-| heavy aquatic-1 ws | 4000 (4000) | 1 s | 0 | 110,184 | 1.34 | 12.1 | 443.9 (45.5) | 113.6 (102.0) | 155.78 / 7634.94 | – |
-| heavy aquatic-n ws | 4000 (4000) | 1 s | 0 | 167,445 | 5.08 | 30.4 | 463.7 (160.1) | 118.7 (77.7) | 0.82 / 24.64 | – |
-| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 127,999 | 0.59 | 4.6 | 20.5 (2.9) | 5.2 (4.5) | 0.26 / 1.65 | 100.0 |
-| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,009 | 1.02 | 8.0 | 24.5 (3.1) | 6.3 (5.5) | 0.28 / 0.94 | 100.0 |
-| media aquatic-1 ws | 3000 (3000) | 5 s | 0 | 60,048 | 0.84 | 14.0 | 281.2 (45.5) | 96.0 (80.5) | 0.62 / 1.65 | – |
-| media aquatic-n ws | 3000 (3000) | 5 s | 0 | 61,146 | 2.76 | 45.2 | 414.5 (158.1) | 141.5 (87.5) | 0.48 / 7.60 | – |
-| media rust-1 ws | 3000 (3000) | 5 s | 0 | 46,608 | 0.46 | 10.0 | 18.9 (2.8) | 6.5 (5.5) | 0.32 / 0.90 | 100.0 |
-| media rust-n ws | 3000 (3000) | 5 s | 0 | 46,615 | 0.64 | 13.8 | 23.4 (3.1) | 8.0 (6.9) | 0.36 / 18.24 | 100.0 |
+| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % | Wire KiB/s server out / in |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| light aquatic-1 ws | 3000 (3000) | 5 s | 0 | 25,198 | 0.66 | 26.2 | 266.9 (45.5) | 91.1 (75.6) | 0.69 / 1.68 | – | – |
+| light aquatic-1 wss | 3000 (3000) | 5 s | 0 | 25,203 | 0.66 | 26.3 | 293.8 (46.5) | 100.3 (84.4) | 0.70 / 1.73 | – | – |
+| light aquatic-n ws | 3000 (3000) | 5 s | 0 | 25,203 | 1.96 | 77.7 | 394.0 (162.1) | 134.5 (79.2) | 0.68 / 3.83 | – | – |
+| light aquatic-n wss | 3000 (3000) | 5 s | 0 | 25,200 | 1.96 | 77.9 | 415.2 (161.1) | 141.7 (86.8) | 0.64 / 7.73 | – | – |
+| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,200 | 0.30 | 15.9 | 14.5 (2.8) | 4.9 (4.0) | 0.30 / 1.11 | 100.0 | – |
+| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,201 | 0.36 | 18.9 | 45.3 (3.4) | 15.5 (14.3) | 0.37 / 1.22 | 100.0 | – |
+| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,201 | 0.36 | 18.5 | 17.4 (3.1) | 5.9 (4.9) | 0.33 / 1.17 | 100.0 | – |
+| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,203 | 0.41 | 21.2 | 34.5 (3.7) | 11.8 (10.5) | 0.35 / 1.26 | 100.0 | – |
+| heavy aquatic-1 ws | 4000 (4000) | 1 s | 0 | 110,184 | 1.34 | 12.1 | 443.9 (45.5) | 113.6 (102.0) | 155.78 / 7634.94 | – | – |
+| heavy aquatic-n ws | 4000 (4000) | 1 s | 0 | 167,445 | 5.08 | 30.4 | 463.7 (160.1) | 118.7 (77.7) | 0.82 / 24.64 | – | – |
+| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 127,999 | 0.59 | 4.6 | 20.5 (2.9) | 5.2 (4.5) | 0.26 / 1.65 | 100.0 | – |
+| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,009 | 1.02 | 8.0 | 24.5 (3.1) | 6.3 (5.5) | 0.28 / 0.94 | 100.0 | – |
+| media aquatic-1 ws | 3000 (3000) | 5 s | 0 | 60,048 | 0.84 | 14.0 | 281.2 (45.5) | 96.0 (80.5) | 0.62 / 1.65 | – | – |
+| media aquatic-n ws | 3000 (3000) | 5 s | 0 | 61,146 | 2.76 | 45.2 | 414.5 (158.1) | 141.5 (87.5) | 0.48 / 7.60 | – | – |
+| media rust-1 ws | 3000 (3000) | 5 s | 0 | 46,608 | 0.46 | 10.0 | 18.9 (2.8) | 6.5 (5.5) | 0.32 / 0.90 | 100.0 | – |
+| media rust-n ws | 3000 (3000) | 5 s | 0 | 46,615 | 0.64 | 13.8 | 23.4 (3.1) | 8.0 (6.9) | 0.36 / 18.24 | 100.0 | – |
 <!-- perf-tables:end -->
 
 ## 12. Open items
@@ -561,6 +589,15 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   JS tracker and this server send nothing), so it sends ~10× more announce replies; its CPU µs /
   msg includes them. Where aquatic's CPU goes with many workers (every request crosses from a
   socket to a swarm worker and back) is not analysed.
+- **permessage-deflate (done, §13.2):** `compression: 1` now negotiates like the JS tracker
+  (header compared by the smoke check). Deflate profile (M1, §11; clients compress everything
+  they send, like browsers): inflating client messages costs about 1 µs / msg (`rust-n` 12.4 vs
+  11.4 µs with `compression: 0`; JS 14.9) and cuts client → server bytes 3.8× (4.7 vs 17.8
+  MiB/s); outgoing compression of messages ≥ 1 KiB (`rust-n-out`) cuts server → client bytes by
+  42% (10.4 vs 18.1 MiB/s) for +60% CPU (19.8 µs / msg, 0.38 vs 0.24 cores). Only announces are
+  large; answers and replies stay under 1 KiB. Autobahn now includes 12.* / 13.*: 517 cases per
+  server, 0 FAILED. Open: dedicated (context takeover) compression is not offered; a smaller
+  outgoing threshold or a faster level was not measured.
 - **Placement, open (research):** creation-time balance cannot foresee popularity — a piece of
   content that outgrows one core stays on it (only its new hashes spill); fixing that needs
   moving live swarms or connections. Swarm-creation races in a mass reconnect (after a restart)
@@ -600,7 +637,8 @@ defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-
 | `servers[].websockets.path` | `/*` | `/*` any path, `/a/*` prefix, else exact (query ignored) |
 | `servers[].websockets.maxPayloadLength` | 65536 | larger message → close |
 | `servers[].websockets.idleTimeout` | 240 s | no frame received for this long → close; pings every `idleTimeout / 2`; 0 = off |
-| `servers[].websockets.compression` | 0 | accepted; > 0 → warning, permessage-deflate is never negotiated |
+| `servers[].websockets.compression` | 1 | permessage-deflate (§13.2): 0 = off; 1 = negotiated like uWebSockets' shared compressor; other values → 1 with a startup warning |
+| `servers[].websockets.compressOutgoingMinSize` (new) | 0 | with permessage-deflate negotiated, outgoing messages at least this long are compressed; 0 = never (like JS) |
 | `servers[].websockets.maxConnections` | 0 (off) | upgrade denied (TCP close) when open WebSockets `> maxConnections` (same off-by-one as JS) |
 | `tracker.maxOffers` / `announceInterval` | 20 / 20 | §6; expiry runs every `announceInterval` |
 | `tracker.offerSelection` | `sample` | `sample` / `window` / `round_robin` (§5.2) |
@@ -620,7 +658,8 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
   head within 10 s).
 - `GET` with `Upgrade: websocket` on a matching path → `maxConnections` and origin checks (fail
   → TCP close) → `101` with `Sec-WebSocket-Accept` (requested `Sec-WebSocket-Protocol` echoed,
-  like uws-tracker; no extensions). Bytes sent right after the head are kept.
+  like uws-tracker) and, if negotiated, `Sec-WebSocket-Extensions` (below). Bytes sent right
+  after the head are kept.
 - Otherwise: `GET /` → `index.html` (200) or `404 Not Found`; `GET /stats.json` (§13.5); anything
   else → `404 Not Found`. HTTP responses close the connection.
 - WebSocket (`src/ws`): own RFC 6455 server framing, one task per connection, driven by socket
@@ -636,8 +675,28 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
   - **Writes:** queued messages are sent with one vectored write per wake-up (frame headers +
     the shared encoder slices, no copy); TLS encrypts up to 64 KiB of frames per batch.
   - Text and binary messages are both parsed (§7); fragmented messages are reassembled.
-  - **Rules / close codes:** RSV bits, unmasked client frames, unknown opcodes, fragmented or
-    > 125-byte control frames, stray continuations → 1002; message > `maxPayloadLength` → 1009;
+  - **permessage-deflate** (`compression` ≥ 1, `ws/deflate.rs`): the first acceptable
+    `permessage-deflate` offer of all `Sec-WebSocket-Extensions` lines is accepted
+    (parameters `server_no_context_takeover`, `client_no_context_takeover`,
+    `server_max_window_bits=8..15`, `client_max_window_bits[=8..15]`; an unknown, repeated or
+    invalid parameter declines that offer). Response: `permessage-deflate;
+    client_no_context_takeover; server_no_context_takeover`, plus
+    `; server_max_window_bits=N` if offered. No context takeover either way, so every message is
+    compressed on its own and a connection keeps no zlib state (2 bytes: negotiated, outgoing
+    window; kept when it moves). RSV1 marks a compressed message on its first frame; the
+    reassembled payload (≤ `maxPayloadLength` compressed) is inflated (`00 00 ff ff`
+    appended, fed separately) by one raw inflater per worker thread (flate2 with zlib-rs, reset
+    per message) into a buffer of the worker (freed above 256 KiB), at most `maxPayloadLength`
+    bytes; then UTF-8 checked and handled like any message. Outgoing messages are compressed
+    only with `compressOutgoingMinSize` > 0, for messages at least that long and connections
+    whose window is ≥ 9 (`server_max_window_bits=8` cannot be produced by zlib): one raw
+    deflater per worker thread and window size (level 1, reset per message, sync flush, the
+    trailing `00 00 ff ff` removed) into a new buffer per message, RSV1 set. Control frames are
+    never compressed.
+  - **Rules / close codes:** RSV2 / RSV3, RSV1 without permessage-deflate or on a control or
+    continuation frame, unmasked client frames, unknown opcodes, fragmented or > 125-byte control
+    frames, stray continuations → 1002; message (compressed or inflated) > `maxPayloadLength` →
+    1009; corrupt compressed data → 1007;
     invalid UTF-8 in a text message or close reason → 1007; a message rejected by the tracker
     (§7.3) → 1008; a received close frame is answered with its code (1000 without one); idle
     timeout (no frame for `idleTimeout`, pings every `idleTimeout / 2`) or a close from the server
@@ -724,7 +783,8 @@ to its own shard / sent to another one (scrape gathers not counted); `busy`: 0�
 
 ## 14. Load test (`crates/wt-loadgen`, `loadtest/run.sh`)
 
-- `wt-loadgen load`: N clients (tokio multi-thread, tokio-tungstenite, rustls with `--ca`), one
+- `wt-loadgen load`: N clients (tokio multi-thread, tokio-tungstenite or with `--deflate` the own
+  client, rustls with `--ca`), one
   connection and one peer_id each, watching one of `--swarms` contents. Each content has
   `--streams` streams (default 1; e.g. 2 = video + audio) and stream 0 has `--qualities`
   qualities (default 1); every (content, stream, quality) is its own swarm. A client announces
@@ -737,10 +797,16 @@ to its own shard / sent to another one (scrape gathers not counted); `busy`: 0�
   After the ramp, a `--duration` s steady phase measures messages/s, announce → reply RTT
   (HdrHistogram), and the server's CPU seconds and RSS (`/proc` or `ps`, `--server-pid`).
   Connection failures and early closes are reported by reason (error text, or the server's close
-  code).
+  code). `--deflate`: the own client (`src/client.rs`: handshake, masked frames out, frames in,
+  RSV1 inflate / deflate without context takeover, plain or rustls) offers Chrome's
+  `permessage-deflate; client_max_window_bits` and, when negotiated, compresses every message it
+  sends (zlib default level, like browsers); it counts bytes on the wire (TLS included):
+  `wire_in_bytes` / `wire_out_bytes` per second and `deflate_negotiated` connections in the
+  report (tungstenite rejects RSV1 frames, so it cannot be used for this).
 - `wt-loadgen smoke`: a deterministic script over 3 clients (announces with full fan-out, an
   answer, a second swarm, scrapes, a stop, an invalid frame); the received messages per client,
-  sorted.
+  sorted; then a permessage-deflate step (own client with Chrome's offer): the server's
+  `Sec-WebSocket-Extensions` and its replies to a compressed announce and scrape.
 - `wt-loadgen gen-cert DIR`: self-signed `cert.pem` / `key.pem` for `localhost` (rcgen).
 - `loadtest/run.sh`: for the profiles light (`LIGHT_CONNS`=3000, re-announce every 5 s, ws and
   wss), heavy (`HEAVY_CONNS`=4000, every 1 s, ws) and media (`MEDIA_CONNS`=3000, video + audio,
@@ -749,7 +815,11 @@ to its own shard / sent to another one (scrape gathers not counted); `busy`: 0�
   with all cores (`content` placement) and with all cores and `placement: "hash"`
   (`rust-n-hash`), each in a fresh process with the same config (`compression: 0`,
   `announceInterval: 120`). After each run it keeps the server's `/stats.json` `placement`
-  (Rust): the Local % column. Then the smoke script against JS and Rust, compared exactly.
+  (Rust): the Local % column. Profile deflate (`DEFLATE_CONNS`=3000, every 5 s, ws, `--deflate`)
+  runs its own targets: `js`, `rust-1`, `rust-n` with `compression: 1`, `rust-n-out` (also
+  `compressOutgoingMinSize: 1024`) and `rust-n-off` (`compression: 0`: the uncompressed
+  baseline with the same client); the Wire column. Then the smoke script against JS and Rust
+  (both `compression: 1`), compared exactly, the deflate step included.
   Writes `bench/results/load.json` and regenerates the load table of §11.
 - `loadtest/aquatic.sh`: the same profiles against [aquatic_ws](https://github.com/greatest-ape/aquatic)
   (Linux only: glommio / io_uring), pinned by `AQUATIC_REV`. `loadtest/aquatic/Dockerfile` builds

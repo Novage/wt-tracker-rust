@@ -22,6 +22,7 @@ use tokio::sync::Notify;
 use tokio::time::{Instant, sleep_until, timeout};
 
 use super::codec::{self, Data, Fragments, OpCode, Parsed, close};
+use super::deflate::{self, Negotiated};
 use crate::worker::{Out, Pop};
 
 /// Bytes read per readiness round before frames are processed.
@@ -70,6 +71,9 @@ pub(crate) struct Limits {
     pub max_payload: usize,
     /// No frame received for this long → close; pings every half of it. Zero: off.
     pub idle: Duration,
+    /// With permessage-deflate, outgoing messages at least this long are compressed. Zero:
+    /// never.
+    pub compress_min: usize,
 }
 
 fn other<E: std::fmt::Display>(e: E) -> io::Error {
@@ -407,6 +411,13 @@ impl OutFrame {
         }
     }
 
+    /// A data message, compressed with `window` bits (RSV1 set).
+    fn compressed(opcode: OpCode, message: &[u8], window: u8) -> Self {
+        let mut frame = Self::new(opcode, deflate::deflate(message, window));
+        frame.head[0] |= 0x40;
+        frame
+    }
+
     fn len(&self) -> usize {
         self.head_len as usize + self.payload.len()
     }
@@ -431,6 +442,8 @@ struct Conn<'e, E: Endpoint> {
     last_rx: Instant,
     /// The endpoint asked to detach; the rest of the input is in `pending`.
     detached: bool,
+    /// permessage-deflate, if negotiated.
+    deflate: Option<Negotiated>,
 }
 
 impl<'e, E: Endpoint> Conn<'e, E> {
@@ -445,11 +458,29 @@ impl<'e, E: Endpoint> Conn<'e, E> {
     }
 
     /// Moves queued frames from the endpoint into `out`.
+    /// A text / binary frame, compressed if negotiated and the message is large enough.
+    fn data_frame(&self, opcode: OpCode, message: Bytes) -> OutFrame {
+        match self.deflate.and_then(|d| d.out_window) {
+            Some(window)
+                if self.limits.compress_min > 0 && message.len() >= self.limits.compress_min =>
+            {
+                OutFrame::compressed(opcode, &message, window)
+            }
+            _ => OutFrame::new(opcode, message),
+        }
+    }
+
     fn refill(&mut self) {
         while self.out.len() < WRITE_BATCH && self.closing.is_none() {
             match self.ep.pop() {
-                Pop::Frame(Out::Text(m)) => self.out.push_back(OutFrame::new(OpCode::Text, m)),
-                Pop::Frame(Out::Binary(m)) => self.out.push_back(OutFrame::new(OpCode::Binary, m)),
+                Pop::Frame(Out::Text(m)) => {
+                    let frame = self.data_frame(OpCode::Text, m);
+                    self.out.push_back(frame);
+                }
+                Pop::Frame(Out::Binary(m)) => {
+                    let frame = self.data_frame(OpCode::Binary, m);
+                    self.out.push_back(frame);
+                }
                 Pop::Frame(Out::Close) | Pop::Gone => self.closing = Some(close::NORMAL),
                 Pop::Empty => break,
             }
@@ -550,7 +581,11 @@ impl<'e, E: Endpoint> Conn<'e, E> {
     fn process(&mut self, rx: &mut [u8]) -> Result<(), u16> {
         let mut pos = 0;
         let result = loop {
-            match codec::parse_frame(&mut rx[pos..], self.limits.max_payload) {
+            match codec::parse_frame(
+                &mut rx[pos..],
+                self.limits.max_payload,
+                self.deflate.is_some(),
+            ) {
                 Parsed::Frame(frame, used) => {
                     let payload = pos + frame.payload.start..pos + frame.payload.end;
                     pos += used;
@@ -592,11 +627,21 @@ impl<'e, E: Endpoint> Conn<'e, E> {
                     .push(frame, payload, self.limits.max_payload)?
                 {
                     Data::Partial => Ok(Flow::Continue),
-                    Data::Message(text, data) => {
-                        if text && std::str::from_utf8(data).is_err() {
-                            Err(close::INVALID_DATA)
+                    Data::Message(text, compressed, data) => {
+                        let ep = self.ep;
+                        let deliver = |message: &[u8]| {
+                            if text && std::str::from_utf8(message).is_err() {
+                                Err(close::INVALID_DATA)
+                            } else {
+                                ep.message(text, message)
+                            }
+                        };
+                        if compressed {
+                            // Into the worker's shared inflate buffer.
+                            deflate::inflate(data, self.limits.max_payload, deliver)
+                                .and_then(|result| result)
                         } else {
-                            self.ep.message(text, data)
+                            deliver(data)
                         }
                     }
                 };
@@ -640,6 +685,7 @@ pub(crate) struct Parked {
     out: VecDeque<OutFrame>,
     out_offset: usize,
     last_rx: Instant,
+    deflate: Option<Negotiated>,
 }
 
 enum SendIo {
@@ -706,11 +752,12 @@ enum End {
 
 /// Runs a WebSocket connection until it closes, or until the endpoint detaches it: then it is
 /// returned parked, untouched since the message that detached it. `pending`: bytes received
-/// after the HTTP head.
+/// after the HTTP head; `deflate`: permessage-deflate as negotiated in the upgrade.
 pub(crate) async fn run<E: Endpoint>(
     io: Io,
     pending: Vec<u8>,
     limits: Limits,
+    deflate: Option<Negotiated>,
     ep: &E,
 ) -> Option<Parked> {
     let conn = Conn {
@@ -724,6 +771,7 @@ pub(crate) async fn run<E: Endpoint>(
         closing: None,
         last_rx: Instant::now(),
         detached: false,
+        deflate,
     };
     drive(conn, pending).await
 }
@@ -750,6 +798,7 @@ pub(crate) async fn resume<E: Endpoint>(
         closing: None,
         last_rx: parked.last_rx,
         detached: false,
+        deflate: parked.deflate,
     };
     let handled = ep.message(true, &first);
     drop(first);
@@ -776,6 +825,7 @@ impl<E: Endpoint> Conn<'_, E> {
             out: self.out,
             out_offset: self.out_offset,
             last_rx: self.last_rx,
+            deflate: self.deflate,
         })
     }
 }

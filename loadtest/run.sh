@@ -6,8 +6,11 @@
 # Three load profiles (env overrides): light = LIGHT_CONNS=3000 conns re-announcing every 5 s (ws
 # and wss); heavy = HEAVY_CONNS=4000 conns every 1 s (ws); media = MEDIA_CONNS=3000 conns in a
 # video and an audio swarm of their content, switching between 4 video qualities every 10 s
-# (old quality stopped after 5 s), re-announcing every 5 s (ws). SWARMS=100 DURATION=15
-# RAMP=1000. After each run the server's /stats.json "placement" is kept (Local % column).
+# (old quality stopped after 5 s), re-announcing every 5 s (ws); deflate = DEFLATE_CONNS=3000 like
+# light, but clients offer permessage-deflate and compress everything they send (as browsers do),
+# against servers with compression 1 (rust-n-out: also compressing outgoing messages of at least
+# 1 KiB; rust-n-off: compression 0, the uncompressed baseline). SWARMS=100 DURATION=15 RAMP=1000.
+# After each run the server's /stats.json "placement" is kept (Local % column).
 # On macOS keep conns below ~12000 (ephemeral ports per destination). The client shares the
 # machine with the server.
 set -euo pipefail
@@ -17,6 +20,7 @@ WT_TRACKER_DIR=${WT_TRACKER_DIR:-../wt-tracker}
 LIGHT_CONNS=${LIGHT_CONNS:-3000}
 HEAVY_CONNS=${HEAVY_CONNS:-4000}
 MEDIA_CONNS=${MEDIA_CONNS:-3000}
+DEFLATE_CONNS=${DEFLATE_CONNS:-3000}
 SWARMS=${SWARMS:-100}
 DURATION=${DURATION:-15}
 RAMP=${RAMP:-1000}
@@ -25,6 +29,7 @@ PROFILES=(
   "light|$LIGHT_CONNS|5|ws wss|"
   "heavy|$HEAVY_CONNS|1|ws|"
   "media|$MEDIA_CONNS|5|ws|--streams 2 --qualities 4 --switch 10 --overlap 5"
+  "deflate|$DEFLATE_CONNS|5|ws|--deflate"
 )
 WS_PORT=18100
 WSS_PORT=18443
@@ -35,19 +40,24 @@ cargo build --release -q -p wt-server -p wt-loadgen
 mkdir -p "$OUT" bench/results
 ./target/release/wt-loadgen gen-cert "$OUT"
 
-config() { # $1 = workers ("" = default), $2 = placement ("" = default)
-  local workers=""
+# $1 = workers ("" = default), $2 = placement ("" = default), $3 = compression (default 0),
+# $4 = more websockets settings (,"key":value)
+config() {
+  local workers="" ws="\"compression\":${3:-0}${4:-}"
   [ -n "$1" ] && workers=",\"workers\":$1"
   [ -n "${2:-}" ] && workers="$workers,\"placement\":\"$2\""
   cat <<EOF
 {"servers":[
-  {"server":{"host":"127.0.0.1","port":$WS_PORT},"websockets":{"compression":0}},
-  {"server":{"host":"127.0.0.1","port":$WSS_PORT,"key_file_name":"$OUT/key.pem","cert_file_name":"$OUT/cert.pem"},"websockets":{"compression":0}}
+  {"server":{"host":"127.0.0.1","port":$WS_PORT},"websockets":{$ws}},
+  {"server":{"host":"127.0.0.1","port":$WSS_PORT,"key_file_name":"$OUT/key.pem","cert_file_name":"$OUT/cert.pem"},"websockets":{$ws}}
  ],"tracker":{"announceInterval":120}$workers}
 EOF
 }
 config 1 > "$OUT/config-1.json"
 config "" > "$OUT/config-n.json"
+config 1 "" 1 > "$OUT/config-1-deflate.json"
+config "" "" 1 > "$OUT/config-n-deflate.json"
+config "" "" 1 ',"compressOutgoingMinSize":1024' > "$OUT/config-n-deflate-out.json"
 config "" hash > "$OUT/config-n-hash.json"
 
 wait_port() {
@@ -78,11 +88,20 @@ declare -a TARGETS=(
   "rust-n|./target/release/wt-tracker $OUT/config-n.json"
   "rust-n-hash|./target/release/wt-tracker $OUT/config-n-hash.json"
 )
+# The deflate profile: servers with compression 1 (JS's default).
+declare -a DEFLATE_TARGETS=(
+  "js|node $WT_TRACKER_DIR/src/run-tracker.ts $OUT/config-1-deflate.json"
+  "rust-1|./target/release/wt-tracker $OUT/config-1-deflate.json"
+  "rust-n|./target/release/wt-tracker $OUT/config-n-deflate.json"
+  "rust-n-out|./target/release/wt-tracker $OUT/config-n-deflate-out.json"
+  "rust-n-off|./target/release/wt-tracker $OUT/config-n.json"
+)
 
 rm -f "$OUT"/run-*.json
 for profile in "${PROFILES[@]}"; do
   IFS='|' read -r pname conns interval protos extra <<< "$profile"
-  for target in "${TARGETS[@]}"; do
+  if [ "$pname" = deflate ]; then targets=("${DEFLATE_TARGETS[@]}"); else targets=("${TARGETS[@]}"); fi
+  for target in "${targets[@]}"; do
     name=${target%%|*}
     command=${target#*|}
     for proto in $protos; do
@@ -114,20 +133,22 @@ try {
 done
 
 echo "== smoke check" >&2
-for name in js rust-n; do
-  for target in "${TARGETS[@]}"; do
-    [ "${target%%|*}" = "$name" ] || continue
-    # shellcheck disable=SC2086
-    start_server "$name" ${target#*|}
-    ./target/release/wt-loadgen smoke --url "ws://127.0.0.1:$WS_PORT/" > "$OUT/smoke-$name.json"
-    stop_server
-  done
+# With compression 1 (the JS default), so the permessage-deflate step is compared too.
+for target in "${DEFLATE_TARGETS[0]}" "${DEFLATE_TARGETS[2]}"; do
+  name=${target%%|*}
+  # shellcheck disable=SC2086
+  start_server "$name" ${target#*|}
+  ./target/release/wt-loadgen smoke --url "ws://127.0.0.1:$WS_PORT/" > "$OUT/smoke-$name.json"
+  stop_server
 done
 
 node -e '
 const fs = require("fs"), os = require("os"), dir = process.argv[1];
 const runs = fs.readdirSync(dir).filter((f) => f.startsWith("run-")).sort().map((f) => JSON.parse(fs.readFileSync(dir + "/" + f)));
-const smoke = (n) => JSON.parse(fs.readFileSync(dir + "/smoke-" + n + ".json")).received;
+const smoke = (n) => {
+  const s = JSON.parse(fs.readFileSync(dir + "/smoke-" + n + ".json"));
+  return { received: s.received, deflate: s.deflate };
+};
 const same = JSON.stringify(smoke("js")) === JSON.stringify(smoke("rust-n"));
 const env = { cpu: os.cpus()[0].model, cores: os.availableParallelism(), os: process.platform + " " + os.release(), node: process.version };
 fs.writeFileSync("bench/results/load.json", JSON.stringify({ env, smoke_same: same, runs }, null, 2));

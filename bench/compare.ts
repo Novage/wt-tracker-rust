@@ -73,7 +73,7 @@ for (const t of threadCounts) {
 type Run = {
   label: string; conns: number; connected: number; failed: number; closed_early: number; interval_s: number;
   swarms: number; offers: number; duration_s: number;
-  per_second: { sent: number; received: number };
+  per_second: { sent: number; received: number; wire_in_bytes?: number | null; wire_out_bytes?: number | null };
   rtt_ms: { p50: number; p99: number };
   server: {
     cpu_cores: number; cpu_us_per_message: number; rss_bytes: number; rss_bytes_per_conn: number;
@@ -82,10 +82,14 @@ type Run = {
   placement?: { localRequests: number; remoteRequests: number };
 };
 const loadTable = (runs: Run[]) => {
-  lines.push("| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % |");
-  lines.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+  lines.push("| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % | Wire KiB/s server out / in |");
+  lines.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+  const wire = (r: Run) => {
+    const { wire_in_bytes: i, wire_out_bytes: o } = r.per_second;
+    return i == null || o == null ? "–" : `${Math.round(i / 1024).toLocaleString("en-US")} / ${Math.round(o / 1024).toLocaleString("en-US")}`;
+  };
   const idle = (v: number | null | undefined, f: (n: number) => string) => (v == null ? "" : ` (${f(v)})`);
-  const order = (l: string) => ["light", "heavy", "media"].findIndex((p) => l.startsWith(p));
+  const order = (l: string) => ["light", "heavy", "media", "deflate"].findIndex((p) => l.startsWith(p));
   const local = (r: Run) => {
     const p = r.placement;
     const all = p ? p.localRequests + p.remoteRequests : 0;
@@ -94,7 +98,7 @@ const loadTable = (runs: Run[]) => {
   for (const r of [...runs].sort((a, b) => order(a.label) - order(b.label) || (a.label < b.label ? -1 : 1))) {
     const s = r.server;
     lines.push(
-      `| ${r.label} | ${r.conns} (${r.connected}) | ${r.interval_s} s | ${r.failed + r.closed_early} | ${Math.round(r.per_second.sent + r.per_second.received).toLocaleString("en-US")} | ${s ? f2(s.cpu_cores) : "?"} | ${s ? f1(s.cpu_us_per_message) : "?"} | ${s ? f1(s.rss_bytes / 2 ** 20) + idle(s.rss_idle_bytes, (b) => f1(b / 2 ** 20)) : "?"} | ${s ? f1(s.rss_bytes_per_conn / 1024) + idle(s.rss_bytes_per_conn_above_idle, (b) => f1(b / 1024)) : "?"} | ${f2(r.rtt_ms.p50)} / ${f2(r.rtt_ms.p99)} | ${local(r)} |`,
+      `| ${r.label} | ${r.conns} (${r.connected}) | ${r.interval_s} s | ${r.failed + r.closed_early} | ${Math.round(r.per_second.sent + r.per_second.received).toLocaleString("en-US")} | ${s ? f2(s.cpu_cores) : "?"} | ${s ? f1(s.cpu_us_per_message) : "?"} | ${s ? f1(s.rss_bytes / 2 ** 20) + idle(s.rss_idle_bytes, (b) => f1(b / 2 ** 20)) : "?"} | ${s ? f1(s.rss_bytes_per_conn / 1024) + idle(s.rss_bytes_per_conn_above_idle, (b) => f1(b / 1024)) : "?"} | ${f2(r.rtt_ms.p50)} / ${f2(r.rtt_ms.p99)} | ${local(r)} | ${wire(r)} |`,
     );
   }
 };
@@ -104,7 +108,7 @@ if (fs.existsSync(loadFile)) {
   const r0 = load.runs[0];
   lines.push("", "### Load test (end to end, `loadtest/run.sh`)", "");
   lines.push(`- ${JSON.stringify(load.env)}; client and server on the same machine.`);
-  lines.push(`- ${r0?.swarms} swarms, ${r0?.offers} offers per announce (1.3 KB SDP), every offer answered, ${Math.round(r0?.duration_s ?? 0)} s steady phase. JS with \`compression: 0\` (Rust does not negotiate permessage-deflate). \`js-workers\` = JS multi-worker tracker, \`rust-1\` / \`rust-n\` = 1 / all-core workers, \`rust-n-hash\` = all-core workers with \`placement: "hash"\`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Local % = requests applied on the connection's own worker (Rust).`);
+  lines.push(`- ${r0?.swarms} swarms, ${r0?.offers} offers per announce (1.3 KB SDP), every offer answered, ${Math.round(r0?.duration_s ?? 0)} s steady phase. Servers with \`compression: 0\` except in the deflate profile (the tungstenite client does not offer permessage-deflate anyway). \`js-workers\` = JS multi-worker tracker, \`rust-1\` / \`rust-n\` = 1 / all-core workers, \`rust-n-hash\` = all-core workers with \`placement: "hash"\`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Profile deflate: like light, but clients offer permessage-deflate and compress everything they send; servers with \`compression: 1\` (\`rust-n-out\`: also compressing outgoing messages ≥ 1 KiB; \`rust-n-off\`: \`compression: 0\`, the uncompressed baseline). Wire = bytes on the client sockets (own client, deflate profile only). Local % = requests applied on the connection's own worker (Rust).`);
   lines.push(`- Wire smoke check (same messages from JS and Rust): **${load.smoke_same ? "yes" : "no"}**.`, "");
   loadTable(load.runs);
 }

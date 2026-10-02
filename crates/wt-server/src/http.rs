@@ -7,6 +7,7 @@ use base64::Engine;
 use sha1::{Digest, Sha1};
 
 use crate::config::AccessConfig;
+use crate::ws::deflate::{self, Negotiated};
 
 /// Request heads larger than this are rejected.
 const MAX_HEAD: usize = 8 * 1024;
@@ -19,6 +20,8 @@ pub struct Head {
     pub upgrade_websocket: bool,
     pub websocket_key: Option<String>,
     pub websocket_protocol: Option<String>,
+    /// Every `Sec-WebSocket-Extensions` line, joined by `, `.
+    pub websocket_extensions: Option<String>,
     pub origin: Option<String>,
 }
 
@@ -42,6 +45,12 @@ pub fn parse_head(buf: &[u8]) -> io::Result<Option<(Head, usize)>> {
                     head.websocket_key = Some(value());
                 } else if h.name.eq_ignore_ascii_case("sec-websocket-protocol") {
                     head.websocket_protocol = Some(value());
+                } else if h.name.eq_ignore_ascii_case("sec-websocket-extensions") {
+                    let value = value();
+                    head.websocket_extensions = Some(match head.websocket_extensions.take() {
+                        Some(earlier) => format!("{earlier}, {value}"),
+                        None => value,
+                    });
                 } else if h.name.eq_ignore_ascii_case("origin") {
                     head.origin = Some(value());
                 }
@@ -82,8 +91,12 @@ pub fn origin_allowed(access: &AccessConfig, origin: Option<&str>) -> bool {
     true
 }
 
-/// The `101 Switching Protocols` response for a valid upgrade request.
-pub fn upgrade_response(head: &Head) -> io::Result<String> {
+/// The `101 Switching Protocols` response for a valid upgrade request, and permessage-deflate
+/// if `compression` is on and the client offered it acceptably.
+pub fn upgrade_response(
+    head: &Head,
+    compression: bool,
+) -> io::Result<(String, Option<Negotiated>)> {
     let key = head
         .websocket_key
         .as_deref()
@@ -99,8 +112,15 @@ pub fn upgrade_response(head: &Head) -> io::Result<String> {
     if let Some(protocol) = &head.websocket_protocol {
         response.push_str(&format!("Sec-WebSocket-Protocol: {protocol}\r\n"));
     }
+    let negotiated = match &head.websocket_extensions {
+        Some(offers) if compression => deflate::negotiate(offers),
+        _ => None,
+    };
+    if let Some((_, extension)) = &negotiated {
+        response.push_str(&format!("Sec-WebSocket-Extensions: {extension}\r\n"));
+    }
     response.push_str("\r\n");
-    Ok(response)
+    Ok((response, negotiated.map(|(n, _)| n)))
 }
 
 /// A complete response that asks the client to close.

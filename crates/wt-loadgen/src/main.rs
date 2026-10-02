@@ -4,11 +4,13 @@
 //! ```text
 //! wt-loadgen load  --url ws://127.0.0.1:8000/ [--conns 5000] [--swarms 100] [--offers 10]
 //!                  [--interval 5] [--ramp 1000] [--duration 30] [--threads N] [--ca cert.pem]
-//!                  [--streams 1] [--qualities 1] [--switch 0] [--overlap 5]
+//!                  [--streams 1] [--qualities 1] [--switch 0] [--overlap 5] [--deflate]
 //!                  [--server-pid PID] [--label NAME]           → JSON report on stdout
 //! wt-loadgen smoke --url ws://127.0.0.1:8000/ [--ca cert.pem]  → JSON transcript on stdout
 //! wt-loadgen gen-cert DIR                                       → DIR/cert.pem, DIR/key.pem
 //! ```
+
+mod client;
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -37,7 +39,7 @@ fn num<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> T {
     })
 }
 
-fn connector(args: &[String]) -> Option<Connector> {
+fn tls_config(args: &[String]) -> Option<Arc<rustls::ClientConfig>> {
     let ca = arg(args, "--ca")?;
     let pem = std::fs::read(&ca).unwrap_or_else(|e| panic!("{ca}: {e}"));
     let mut roots = rustls::RootCertStore::empty();
@@ -52,7 +54,62 @@ fn connector(args: &[String]) -> Option<Connector> {
     .unwrap()
     .with_root_certificates(roots)
     .with_no_client_auth();
-    Some(Connector::Rustls(Arc::new(config)))
+    Some(Arc::new(config))
+}
+
+fn connector(args: &[String]) -> Option<Connector> {
+    tls_config(args).map(Connector::Rustls)
+}
+
+/// A client connection: tokio-tungstenite, or the own client (permessage-deflate, wire bytes).
+enum Conn {
+    Tungstenite(Box<Ws>),
+    Own(Box<client::Client>),
+}
+
+enum In {
+    Text(String),
+    Close(Option<u16>),
+    Error(String),
+    End,
+    Other,
+}
+
+impl Conn {
+    async fn send(&mut self, text: String) -> bool {
+        match self {
+            Conn::Tungstenite(ws) => ws.send(Message::text(text)).await.is_ok(),
+            Conn::Own(c) => c.send_text(&text).await.is_ok(),
+        }
+    }
+
+    /// Cancel safe.
+    async fn recv(&mut self) -> In {
+        match self {
+            Conn::Tungstenite(ws) => match ws.next().await {
+                Some(Ok(Message::Text(t))) => In::Text(t.to_string()),
+                Some(Ok(Message::Close(frame))) => In::Close(frame.map(|f| u16::from(f.code))),
+                Some(Ok(_)) => In::Other,
+                Some(Err(e)) => In::Error(e.to_string()),
+                None => In::End,
+            },
+            Conn::Own(c) => match c.next().await {
+                Ok(Some(client::Incoming::Text(t))) => In::Text(t),
+                Ok(Some(client::Incoming::Close(code))) => In::Close(code),
+                Ok(None) => In::End,
+                Err(e) => In::Error(e),
+            },
+        }
+    }
+
+    async fn close(&mut self) {
+        match self {
+            Conn::Tungstenite(ws) => {
+                let _ = ws.close(None).await;
+            }
+            Conn::Own(c) => c.close().await,
+        }
+    }
 }
 
 async fn connect(url: &str, connector: Option<Connector>) -> Result<Ws, String> {
@@ -108,10 +165,12 @@ struct Counters {
     offers: AtomicU64,
     answers: AtomicU64,
     sent_stops: AtomicU64,
+    /// Connections that negotiated permessage-deflate (`--deflate`).
+    deflate: AtomicU64,
 }
 
 impl Counters {
-    fn snapshot(&self) -> [u64; 6] {
+    fn snapshot(&self, wire: &client::Wire) -> [u64; 8] {
         [
             self.sent_announces.load(Relaxed),
             self.sent_answers.load(Relaxed),
@@ -119,6 +178,8 @@ impl Counters {
             self.offers.load(Relaxed),
             self.answers.load(Relaxed),
             self.sent_stops.load(Relaxed),
+            wire.read.load(Relaxed),
+            wire.written.load(Relaxed),
         ]
     }
 }
@@ -126,6 +187,10 @@ impl Counters {
 struct Load {
     url: String,
     connector: Option<Connector>,
+    tls: Option<Arc<rustls::ClientConfig>>,
+    /// Own client offering permessage-deflate and compressing everything it sends.
+    deflate: bool,
+    wire: Arc<client::Wire>,
     swarms: usize,
     offers: Vec<Vec<String>>,
     interval: Duration,
@@ -144,7 +209,16 @@ struct Load {
 }
 
 async fn client(load: Arc<Load>, n: usize) {
-    let mut ws = match connect(&load.url, load.connector.clone()).await {
+    let connected = if load.deflate {
+        client::connect(&load.url, load.tls.clone(), true, load.wire.clone())
+            .await
+            .map(|c| Conn::Own(Box::new(c)))
+    } else {
+        connect(&load.url, load.connector.clone())
+            .await
+            .map(|ws| Conn::Tungstenite(Box::new(ws)))
+    };
+    let mut ws = match connected {
         Ok(ws) => ws,
         Err(e) => {
             load.counters.failed.fetch_add(1, Relaxed);
@@ -153,6 +227,9 @@ async fn client(load: Arc<Load>, n: usize) {
         }
     };
     load.counters.connected.fetch_add(1, Relaxed);
+    if matches!(&ws, Conn::Own(c) if c.deflate()) {
+        load.counters.deflate.fetch_add(1, Relaxed);
+    }
     let peer_id = id('c', n);
     let content = n % load.swarms;
     // Every (content, stream, quality) is its own swarm; one stream and quality = one swarm
@@ -172,7 +249,7 @@ async fn client(load: Arc<Load>, n: usize) {
     let mut pending: Option<Instant> = Some(Instant::now());
     for info_hash in &hashes {
         let message = announce(info_hash, &peer_id, Some("started"), offers);
-        if ws.send(Message::text(message)).await.is_err() {
+        if !ws.send(message).await {
             load.counters.closed_early.fetch_add(1, Relaxed);
             return;
         }
@@ -200,7 +277,7 @@ async fn client(load: Arc<Load>, n: usize) {
             _ = tick.tick() => {
                 pending.get_or_insert_with(Instant::now);
                 for info_hash in &hashes {
-                    if ws.send(Message::text(announce(info_hash, &peer_id, None, offers))).await.is_err() {
+                    if !ws.send(announce(info_hash, &peer_id, None, offers)).await {
                         load.counters.closed_early.fetch_add(1, Relaxed);
                         return;
                     }
@@ -212,7 +289,7 @@ async fn client(load: Arc<Load>, n: usize) {
                 let old = std::mem::replace(&mut hashes[0], stream_hash(0, quality));
                 stops.push_back((tokio::time::Instant::now() + load.overlap, old));
                 let message = announce(&hashes[0], &peer_id, Some("started"), offers);
-                if ws.send(Message::text(message)).await.is_err() {
+                if !ws.send(message).await {
                     load.counters.closed_early.fetch_add(1, Relaxed);
                     return;
                 }
@@ -223,34 +300,34 @@ async fn client(load: Arc<Load>, n: usize) {
                 // Back to an old quality within the overlap: it is still in use.
                 if !hashes.contains(&old) {
                     let message = announce(&old, &peer_id, Some("stopped"), &[]);
-                    if ws.send(Message::text(message)).await.is_err() {
+                    if !ws.send(message).await {
                         load.counters.closed_early.fetch_add(1, Relaxed);
                         return;
                     }
                     load.counters.sent_stops.fetch_add(1, Relaxed);
                 }
             }
-            message = ws.next() => {
-                let message = match message {
-                    Some(Ok(Message::Close(frame))) => {
+            message = ws.recv() => {
+                let text = match message {
+                    In::Text(text) => text,
+                    In::Other => continue,
+                    In::Close(code) => {
                         load.counters.closed_early.fetch_add(1, Relaxed);
-                        let reason = format!("closed by server: {:?}", frame.map(|f| u16::from(f.code)));
+                        let reason = format!("closed by server: {code:?}");
                         *load.failures.lock().unwrap().entry(reason).or_default() += 1;
                         return;
                     }
-                    Some(Ok(message)) => message,
-                    Some(Err(e)) => {
+                    In::Error(e) => {
                         load.counters.closed_early.fetch_add(1, Relaxed);
                         *load.failures.lock().unwrap().entry(format!("read error: {e}")).or_default() += 1;
                         return;
                     }
-                    None => {
+                    In::End => {
                         load.counters.closed_early.fetch_add(1, Relaxed);
                         *load.failures.lock().unwrap().entry("stream ended".into()).or_default() += 1;
                         return;
                     }
                 };
-                let Message::Text(text) = message else { continue };
                 if text.contains("\"interval\":") {
                     load.counters.replies.fetch_add(1, Relaxed);
                     if let Some(sent) = pending.take()
@@ -264,7 +341,7 @@ async fn client(load: Arc<Load>, n: usize) {
                         (field(&text, "info_hash"), field(&text, "peer_id"), field(&text, "offer_id"))
                     {
                         let reply = answer(info_hash, &peer_id, from, offer_id, &answer_sdp);
-                        if ws.send(Message::text(reply)).await.is_err() {
+                        if !ws.send(reply).await {
                             load.counters.closed_early.fetch_add(1, Relaxed);
                             return;
                         }
@@ -276,7 +353,7 @@ async fn client(load: Arc<Load>, n: usize) {
             }
         }
     }
-    let _ = ws.close(None).await;
+    ws.close().await;
 }
 
 /// Cumulative CPU seconds and RSS bytes of a process.
@@ -324,6 +401,7 @@ async fn run_load(args: Vec<String>) -> Value {
     let qualities: usize = num(&args, "--qualities", 1usize).max(1);
     let switch = Duration::from_secs_f64(num(&args, "--switch", 0.0));
     let overlap = Duration::from_secs_f64(num(&args, "--overlap", 5.0));
+    let deflate = args.iter().any(|a| a == "--deflate");
     let server_pid: Option<u32> =
         arg(&args, "--server-pid").map(|p| p.parse().expect("--server-pid"));
 
@@ -344,6 +422,9 @@ async fn run_load(args: Vec<String>) -> Value {
     let load = Arc::new(Load {
         url: url.clone(),
         connector: connector(&args),
+        tls: tls_config(&args),
+        deflate,
+        wire: Arc::default(),
         swarms,
         offers,
         interval,
@@ -380,14 +461,14 @@ async fn run_load(args: Vec<String>) -> Value {
     tokio::time::sleep(interval).await;
 
     // Steady phase.
-    let before = load.counters.snapshot();
+    let before = load.counters.snapshot(&load.wire);
     let usage_before = server_pid.and_then(process_usage);
     load.measuring.store(true, Relaxed);
     let started = Instant::now();
     tokio::time::sleep(duration).await;
     let elapsed = started.elapsed().as_secs_f64();
     load.measuring.store(false, Relaxed);
-    let after = load.counters.snapshot();
+    let after = load.counters.snapshot(&load.wire);
     let usage_after = server_pid.and_then(process_usage);
 
     let _ = stop_tx.send(true);
@@ -395,7 +476,7 @@ async fn run_load(args: Vec<String>) -> Value {
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
     }
 
-    let d: Vec<f64> = (0..6)
+    let d: Vec<f64> = (0..8)
         .map(|i| (after[i] - before[i]) as f64 / elapsed)
         .collect();
     let sent = d[0] + d[1] + d[5];
@@ -433,10 +514,15 @@ async fn run_load(args: Vec<String>) -> Value {
         "switch_s": switch.as_secs_f64(),
         "overlap_s": overlap.as_secs_f64(),
         "interval_s": interval.as_secs_f64(),
+        "deflate": deflate,
+        "deflate_negotiated": load.counters.deflate.load(Relaxed),
         "duration_s": elapsed,
         "per_second": {
             "announces": d[0], "answers_sent": d[1], "replies": d[2], "offers": d[3], "answers_received": d[4],
             "stops": d[5],
+            // Own client only (--deflate): bytes on the wire, TLS included.
+            "wire_in_bytes": deflate.then_some(d[6]),
+            "wire_out_bytes": deflate.then_some(d[7]),
             "sent": sent, "received": received,
         },
         "rtt_ms": { "p50": ms(0.5), "p99": ms(0.99), "max": rtt.max() as f64 / 1000.0, "samples": rtt.len() },
@@ -500,7 +586,29 @@ async fn run_smoke(args: Vec<String>) -> Value {
     for messages in &mut got {
         messages.sort();
     }
-    json!({ "url": url, "received": got })
+    json!({ "url": url, "received": got, "deflate": smoke_deflate(&url, &args).await })
+}
+
+/// permessage-deflate: the extension the server agrees to for Chrome's offer, and its replies
+/// to compressed messages.
+async fn smoke_deflate(url: &str, args: &[String]) -> Value {
+    let mut c = client::connect(url, tls_config(args), true, Arc::default())
+        .await
+        .expect("connect");
+    let extension = c.extension.clone();
+    let mut received = Vec::new();
+    for message in [
+        announce("hsmoke00000000000003", "pd", Some("started"), &[]),
+        r#"{"action":"scrape","info_hash":"hsmoke00000000000003"}"#.to_string(),
+    ] {
+        c.send_text(&message).await.expect("send");
+        while let Ok(Ok(Some(client::Incoming::Text(t)))) =
+            tokio::time::timeout(Duration::from_millis(300), c.next()).await
+        {
+            received.push(t);
+        }
+    }
+    json!({ "extension": extension, "received": received })
 }
 
 fn gen_cert(dir: &str) {

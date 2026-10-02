@@ -17,6 +17,7 @@ use crate::http;
 use crate::stats;
 use crate::worker::{Event, Handled, Pop, Worker};
 use crate::ws::codec::close;
+use crate::ws::deflate::Negotiated;
 use crate::ws::driver::{self, Endpoint, Flow, Io, Limits, Parked};
 
 /// TLS handshake + HTTP request head must complete within this time.
@@ -50,13 +51,13 @@ async fn serve(me: Rc<Worker>, listener: usize, stream: TcpStream) {
         return;
     };
     match route(&me, listener, &head).await {
-        Route::Upgrade(response) => {
+        Route::Upgrade(response, deflate) => {
             if io.write_all(response.as_bytes()).await.is_err() {
                 return;
             }
             info.web_sockets.fetch_add(1, Relaxed);
             let endpoint = TrackerEndpoint::new(&me, false);
-            let parked = driver::run(io, rest, limits(&me, listener), &endpoint).await;
+            let parked = driver::run(io, rest, limits(&me, listener), deflate, &endpoint).await;
             let conn = endpoint.conn;
             match (parked, endpoint.moving.take()) {
                 // Moved before anything was applied: no shard holds the connection.
@@ -89,6 +90,7 @@ fn limits(me: &Worker, listener: usize) -> Limits {
     Limits {
         max_payload: ws.max_payload_length,
         idle: Duration::from_secs(ws.idle_timeout),
+        compress_min: ws.compress_outgoing_min_size,
     }
 }
 
@@ -120,8 +122,8 @@ pub(crate) async fn adopted(me: Rc<Worker>, adopt: Adopt) {
 
 /// What to do with a request head (spec §13.2).
 enum Route {
-    /// Upgrade with this `101` response.
-    Upgrade(String),
+    /// Upgrade with this `101` response (and permessage-deflate, if negotiated).
+    Upgrade(String, Option<Negotiated>),
     /// Send this complete HTTP response, then close.
     Respond(Vec<u8>),
     /// Close the TCP connection without a response (denied upgrade).
@@ -142,8 +144,8 @@ async fn route(me: &Rc<Worker>, listener: usize, head: &http::Head) -> Route {
         if !http::origin_allowed(&me.shared.access, head.origin.as_deref()) {
             return Route::Drop;
         }
-        return match http::upgrade_response(head) {
-            Ok(response) => Route::Upgrade(response),
+        return match http::upgrade_response(head, info.websockets.compression > 0) {
+            Ok((response, deflate)) => Route::Upgrade(response, deflate),
             Err(_) => Route::Drop,
         };
     }
