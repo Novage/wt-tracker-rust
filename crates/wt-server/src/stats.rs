@@ -22,10 +22,10 @@ pub(crate) async fn json(me: &Rc<Worker>) -> String {
     let mut peers = 0u64;
     let per_tracker: Vec<Value> = per_shard
         .iter()
-        .map(|swarms| {
+        .map(|shard| {
             let mut map = Map::new();
             let mut total = 0u64;
-            for (info_hash, count) in swarms {
+            for (info_hash, count) in &shard.swarms {
                 torrents += 1;
                 total += *count as u64;
                 map.insert(binary_hex(info_hash), json!(count));
@@ -50,6 +50,16 @@ pub(crate) async fn json(me: &Rc<Worker>) -> String {
         "memory": { "rss": rss_bytes() },
         "workers": me.shared.workers,
         "droppedMessages": DROPPED_MESSAGES.load(Relaxed),
+        "placement": {
+            "mode": me.shared.placement.name(),
+            "movedConnections": per_shard.iter().map(|s| s.moved_in).sum::<u64>(),
+            "localRequests": per_shard.iter().map(|s| s.local_requests).sum::<u64>(),
+            "remoteRequests": per_shard.iter().map(|s| s.remote_requests).sum::<u64>(),
+            "workers": me.shared.loads.snapshot().iter()
+                .map(|l| json!({ "connections": l.conns, "busy": l.busy as f64 / 1000.0 }))
+                .collect::<Vec<_>>(),
+            "directorySize": me.shared.directory.len(),
+        },
         "peersCountPerInfoHashPerTracker": per_tracker,
     })
     .to_string()

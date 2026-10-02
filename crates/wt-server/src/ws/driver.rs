@@ -46,10 +46,18 @@ thread_local! {
     static TX_CIPHER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
+/// What the driver does after a message.
+pub(crate) enum Flow {
+    Continue,
+    /// Stop reading and hand the connection back ([`run`] returns it parked) to be resumed on
+    /// another worker.
+    Detach,
+}
+
 /// What a connection is attached to (the tracker worker, or the echo server).
 pub(crate) trait Endpoint {
     /// A complete message; text is already UTF-8 validated. `Err(code)`: close with it.
-    fn message(&self, text: bool, data: &[u8]) -> Result<(), u16>;
+    fn message(&self, text: bool, data: &[u8]) -> Result<Flow, u16>;
     /// Next queued outgoing frame.
     fn pop(&self) -> Pop;
     /// Notified when outgoing frames are queued.
@@ -421,6 +429,8 @@ struct Conn<'e, E: Endpoint> {
     /// Close with this code once the queue is written.
     closing: Option<u16>,
     last_rx: Instant,
+    /// The endpoint asked to detach; the rest of the input is in `pending`.
+    detached: bool,
 }
 
 impl<'e, E: Endpoint> Conn<'e, E> {
@@ -545,8 +555,13 @@ impl<'e, E: Endpoint> Conn<'e, E> {
                     let payload = pos + frame.payload.start..pos + frame.payload.end;
                     pos += used;
                     self.last_rx = Instant::now();
-                    if let Err(code) = self.on_frame(&frame, &rx[payload]) {
-                        break Err(code);
+                    match self.on_frame(&frame, &rx[payload]) {
+                        Ok(Flow::Continue) => {}
+                        Ok(Flow::Detach) => {
+                            self.detached = true;
+                            break Ok(());
+                        }
+                        Err(code) => break Err(code),
                     }
                 }
                 Parsed::Incomplete(_) => break Ok(()),
@@ -562,13 +577,13 @@ impl<'e, E: Endpoint> Conn<'e, E> {
         result
     }
 
-    fn on_frame(&mut self, frame: &codec::Frame, payload: &[u8]) -> Result<(), u16> {
+    fn on_frame(&mut self, frame: &codec::Frame, payload: &[u8]) -> Result<Flow, u16> {
         match frame.opcode {
             OpCode::Ping => {
                 self.push_control(OutFrame::new(OpCode::Pong, Bytes::copy_from_slice(payload)));
-                Ok(())
+                Ok(Flow::Continue)
             }
-            OpCode::Pong => Ok(()),
+            OpCode::Pong => Ok(Flow::Continue),
             // Answer with the peer's code (or 1000), then close.
             OpCode::Close => Err(codec::close_code(payload)?.unwrap_or(close::NORMAL)),
             _ => {
@@ -576,7 +591,7 @@ impl<'e, E: Endpoint> Conn<'e, E> {
                     .fragments
                     .push(frame, payload, self.limits.max_payload)?
                 {
-                    Data::Partial => Ok(()),
+                    Data::Partial => Ok(Flow::Continue),
                     Data::Message(text, data) => {
                         if text && std::str::from_utf8(data).is_err() {
                             Err(close::INVALID_DATA)
@@ -616,10 +631,89 @@ impl<'e, E: Endpoint> Conn<'e, E> {
     }
 }
 
-/// Runs a WebSocket connection until it closes. `pending`: bytes received after the HTTP head.
-pub(crate) async fn run<E: Endpoint>(io: Io, pending: Vec<u8>, limits: Limits, ep: &E) {
-    let idle = limits.idle;
-    let mut conn = Conn {
+/// A connection detached from its endpoint, to be resumed on another worker thread: the socket
+/// (deregistered from this thread's runtime), its TLS session, unparsed input and queued
+/// control frames.
+pub(crate) struct Parked {
+    io: SendIo,
+    pending: Vec<u8>,
+    out: VecDeque<OutFrame>,
+    out_offset: usize,
+    last_rx: Instant,
+}
+
+enum SendIo {
+    Plain(std::net::TcpStream),
+    Tls(Box<SendTls>),
+}
+
+struct SendTls {
+    tcp: std::net::TcpStream,
+    conn: UnbufferedServerConnection,
+    pending_in: Vec<u8>,
+    pending_out: Vec<u8>,
+}
+
+impl Io {
+    fn into_send(self) -> io::Result<SendIo> {
+        Ok(match self {
+            Io::Plain(tcp) => SendIo::Plain(tcp.into_std()?),
+            Io::Tls(t) => {
+                let TlsIo {
+                    tcp,
+                    conn,
+                    pending_in,
+                    pending_out,
+                } = *t;
+                SendIo::Tls(Box::new(SendTls {
+                    tcp: tcp.into_std()?,
+                    conn,
+                    pending_in,
+                    pending_out,
+                }))
+            }
+        })
+    }
+}
+
+impl SendIo {
+    /// Registers the socket with the current thread's runtime.
+    fn into_io(self) -> io::Result<Io> {
+        Ok(match self {
+            SendIo::Plain(tcp) => Io::Plain(TcpStream::from_std(tcp)?),
+            SendIo::Tls(t) => {
+                let SendTls {
+                    tcp,
+                    conn,
+                    pending_in,
+                    pending_out,
+                } = *t;
+                Io::Tls(Box::new(TlsIo {
+                    tcp: TcpStream::from_std(tcp)?,
+                    conn,
+                    pending_in,
+                    pending_out,
+                }))
+            }
+        })
+    }
+}
+
+enum End {
+    Close(Option<u16>),
+    Detach,
+}
+
+/// Runs a WebSocket connection until it closes, or until the endpoint detaches it: then it is
+/// returned parked, untouched since the message that detached it. `pending`: bytes received
+/// after the HTTP head.
+pub(crate) async fn run<E: Endpoint>(
+    io: Io,
+    pending: Vec<u8>,
+    limits: Limits,
+    ep: &E,
+) -> Option<Parked> {
+    let conn = Conn {
         io,
         ep,
         limits,
@@ -629,26 +723,89 @@ pub(crate) async fn run<E: Endpoint>(io: Io, pending: Vec<u8>, limits: Limits, e
         out_offset: 0,
         closing: None,
         last_rx: Instant::now(),
+        detached: false,
     };
+    drive(conn, pending).await
+}
+
+/// Continues a parked connection on this thread: `first` is the message that detached it
+/// (handled here first, then freed), then the rest of its input.
+pub(crate) async fn resume<E: Endpoint>(
+    parked: Parked,
+    first: Bytes,
+    limits: Limits,
+    ep: &E,
+) -> Option<Parked> {
+    let Ok(io) = parked.io.into_io() else {
+        return None;
+    };
+    let mut conn = Conn {
+        io,
+        ep,
+        limits,
+        pending: Vec::new(),
+        fragments: Fragments::default(),
+        out: parked.out,
+        out_offset: parked.out_offset,
+        closing: None,
+        last_rx: parked.last_rx,
+        detached: false,
+    };
+    let handled = ep.message(true, &first);
+    drop(first);
+    match handled {
+        Ok(Flow::Continue) => {}
+        Ok(Flow::Detach) => conn.detached = true,
+        Err(code) => {
+            conn.finish(Some(code)).await;
+            return None;
+        }
+    }
+    if conn.detached {
+        conn.pending = parked.pending;
+        return conn.park();
+    }
+    drive(conn, parked.pending).await
+}
+
+impl<E: Endpoint> Conn<'_, E> {
+    fn park(self) -> Option<Parked> {
+        Some(Parked {
+            io: self.io.into_send().ok()?,
+            pending: self.pending,
+            out: self.out,
+            out_offset: self.out_offset,
+            last_rx: self.last_rx,
+        })
+    }
+}
+
+async fn drive<E: Endpoint>(mut conn: Conn<'_, E>, pending: Vec<u8>) -> Option<Parked> {
+    let ep = conn.ep;
+    let idle = conn.limits.idle;
     if !pending.is_empty() {
         let mut rx = pending;
         if let Err(code) = conn.process(&mut rx) {
-            return conn.finish(Some(code)).await;
+            conn.finish(Some(code)).await;
+            return None;
+        }
+        if conn.detached {
+            return conn.park();
         }
     }
 
     let ping_every = idle / 2;
     let mut next_ping = Instant::now() + ping_every;
     let mut want_write = !conn.out.is_empty();
-    let code = loop {
+    let end = loop {
         if want_write || conn.io.has_pending_out() {
             match conn.try_flush() {
                 Ok(done) => want_write = !done,
-                Err(_) => break None,
+                Err(_) => break End::Close(None),
             }
         }
         if !want_write && let Some(code) = conn.closing {
-            break Some(code);
+            break End::Close(Some(code));
         }
         let interest = if want_write {
             Interest::READABLE | Interest::WRITABLE
@@ -667,12 +824,13 @@ pub(crate) async fn run<E: Endpoint>(io: Io, pending: Vec<u8>, limits: Limits, e
             }
             _ = ep.wake().notified(), if !want_write => want_write = true,
             ready = conn.io.tcp().ready(interest) => {
-                let Ok(ready) = ready else { break None };
+                let Ok(ready) = ready else { break End::Close(None) };
                 if ready.is_readable() {
                     match conn.on_readable() {
+                        Ok(true) if conn.detached => break End::Detach,
                         Ok(true) => {}
-                        Ok(false) => break None,
-                        Err(code) => break code,
+                        Ok(false) => break End::Close(None),
+                        Err(code) => break End::Close(code),
                     }
                     // Replies were probably queued while handling the input: send them now.
                     want_write = true;
@@ -686,8 +844,16 @@ pub(crate) async fn run<E: Endpoint>(io: Io, pending: Vec<u8>, limits: Limits, e
                 next_ping = Instant::now() + ping_every;
                 want_write = true;
             }
-            _ = sleep_until(conn.last_rx + idle), if !idle.is_zero() => break Some(close::NORMAL),
+            _ = sleep_until(conn.last_rx + idle), if !idle.is_zero() => {
+                break End::Close(Some(close::NORMAL));
+            }
         }
     };
-    conn.finish(code).await;
+    match end {
+        End::Detach => conn.park(),
+        End::Close(code) => {
+            conn.finish(code).await;
+            None
+        }
+    }
 }

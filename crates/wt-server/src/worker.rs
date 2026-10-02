@@ -15,11 +15,12 @@ use slab::Slab;
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::{LocalSet, spawn_local};
-use wt_core::{ConnId, Outbox, Shard};
+use wt_core::{ConnId, Key, Outbox, Shard};
 use wt_proto::{Batch, Encoder, Message, OwnedMessage, ProtoError};
 
 use crate::Shared;
 use crate::conn;
+use crate::placement::{self, Mode};
 
 /// Events between workers. Sent in batches (`Vec<Event>`), one channel send per destination per
 /// scheduler tick.
@@ -41,10 +42,32 @@ pub(crate) enum Event {
         info_hashes: Option<Vec<Vec<u8>>>,
         reply: oneshot::Sender<Vec<ScrapeEntry>>,
     },
-    /// `(info_hash, peers)` of every swarm of this shard, for `/stats.json`.
-    Stats {
-        reply: oneshot::Sender<Vec<(Vec<u8>, u32)>>,
-    },
+    /// Swarms and counters of this shard, for `/stats.json`.
+    Stats { reply: oneshot::Sender<ShardStats> },
+    /// A connection moved to this worker at its first message (`content` placement).
+    Adopt(Box<conn::Adopt>),
+    /// A request of the connection was forwarded to `shard`: it may hold its peers now.
+    Track { conn: ConnId, shard: usize },
+}
+
+/// Per-shard part of `/stats.json`.
+#[derive(Default)]
+pub(crate) struct ShardStats {
+    /// `(info_hash, peers)` of every swarm.
+    pub swarms: Vec<(Vec<u8>, u32)>,
+    /// Requests of this worker's connections applied to its own shard / sent to another.
+    pub local_requests: u64,
+    pub remote_requests: u64,
+    /// Connections that moved to this worker.
+    pub moved_in: u64,
+}
+
+/// What became of a message.
+pub(crate) enum Handled {
+    Done,
+    /// The connection's first message is an announce for a swarm on worker `w`: move the
+    /// connection there; the message is handled after the move.
+    Move(usize),
 }
 
 pub(crate) struct ScrapeEntry {
@@ -64,6 +87,12 @@ pub(crate) enum Out {
 /// A scrape spanning shards, gathered asynchronously.
 type ScrapeJob = Option<Vec<Vec<u8>>>;
 
+enum Routed {
+    Done,
+    Scrape(ScrapeJob),
+    Move(usize),
+}
+
 pub(crate) enum Pop {
     Frame(Out),
     Empty,
@@ -81,6 +110,8 @@ struct ConnEntry {
     /// Shards this connection announced to (they may hold its peers).
     shard_mask: u64,
     closing: bool,
+    /// Its first message was handled: it stays on this worker.
+    placed: bool,
 }
 
 /// `ConnId` layout: worker (8 bits) | generation (24) | slot (32).
@@ -113,6 +144,10 @@ pub(crate) struct Worker {
     outbox: RefCell<Vec<Vec<Event>>>,
     flush_scheduled: Cell<bool>,
     start: Instant,
+    rng: RefCell<fastrand::Rng>,
+    local_requests: Cell<u64>,
+    remote_requests: Cell<u64>,
+    moved_in: Cell<u64>,
 }
 
 impl Worker {
@@ -128,6 +163,10 @@ impl Worker {
             outbox: RefCell::new((0..workers).map(|_| Vec::new()).collect()),
             flush_scheduled: Cell::new(false),
             start: Instant::now(),
+            rng: RefCell::new(fastrand::Rng::with_seed(seed)),
+            local_requests: Cell::new(0),
+            remote_requests: Cell::new(0),
+            moved_in: Cell::new(0),
         }
     }
 
@@ -140,10 +179,64 @@ impl Worker {
         (self.shared.router.hash_one(info_hash) % self.shared.workers as u64) as usize
     }
 
+    /// Routing by hash only: `hash` placement, or a single worker (nothing to place).
+    fn hashed(&self) -> bool {
+        self.shared.placement == Mode::Hash || self.shared.workers == 1
+    }
+
+    /// The shard owning `info_hash`; `None`: no swarm for it anywhere (`content` placement).
+    fn owner(&self, info_hash: &[u8]) -> Option<usize> {
+        if self.hashed() {
+            return Some(self.shard_of(info_hash));
+        }
+        Key::new(info_hash).and_then(|key| self.shared.directory.get(&key))
+    }
+
+    /// The shard for an announce: the owner, or a new binding (spec §13.3).
+    fn announce_shard(&self, info_hash: &[u8], first: bool) -> usize {
+        if self.hashed() {
+            return self.shard_of(info_hash);
+        }
+        // Too long: the local shard rejects it.
+        let Some(key) = Key::new(info_hash) else {
+            return self.id;
+        };
+        let directory = &self.shared.directory;
+        if let Some(owner) = directory.get(&key) {
+            return owner;
+        }
+        let loads = self.shared.loads.snapshot();
+        let pick = placement::pick_two(&mut self.rng.borrow_mut(), self.shared.workers);
+        let choice = if first {
+            placement::for_new_content(&loads, self.id, pick)
+        } else {
+            placement::for_new_hash(&loads, self.id, pick)
+        };
+        directory.claim(key, choice)
+    }
+
+    /// Bind before create: an announce from another worker for a swarm this shard does not
+    /// have is applied here only if this worker owns (or now claims) the info_hash; otherwise
+    /// returns the owner to forward it to.
+    fn misrouted(&self, shard: &Shard, message: &Message<'_>) -> Option<usize> {
+        if self.hashed() || !matches!(message, Message::Announce { .. }) {
+            return None;
+        }
+        let info_hash = message.route_info_hash()?;
+        let info_hash = info_hash.as_bytes();
+        if shard.swarm_stats(info_hash).is_some() {
+            return None;
+        }
+        let key = Key::new(info_hash)?;
+        let owner = self.shared.directory.claim(key, self.id);
+        (owner != self.id).then_some(owner)
+    }
+
     // ---- connections ----
 
     /// Registers a WebSocket connection: its id, writer wake-up and reader stop signal.
-    pub fn register(&self) -> (ConnId, Rc<Notify>, Rc<Notify>) {
+    /// `placed`: the connection already handled its first message (it moved here).
+    pub fn register(&self, placed: bool) -> (ConnId, Rc<Notify>, Rc<Notify>) {
         let generation = self.next_generation.get().wrapping_add(1) & 0xFF_FFFF;
         self.next_generation.set(generation);
         let notify = Rc::new(Notify::new());
@@ -156,7 +249,12 @@ impl Worker {
             closed: closed.clone(),
             shard_mask: 0,
             closing: false,
+            placed,
         });
+        if placed {
+            self.moved_in.set(self.moved_in.get() + 1);
+        }
+        self.shared.loads.add_conn(self.id, 1);
         (conn_id(self.id, generation, slot), notify, closed)
     }
 
@@ -243,6 +341,7 @@ impl Worker {
             .is_some_and(|e| e.generation == conn_generation(conn))
         {
             conns.remove(conn_slot(conn));
+            self.shared.loads.add_conn(self.id, -1);
         }
     }
 
@@ -259,32 +358,49 @@ impl Worker {
     /// One text/binary frame from a connection of this worker. `Err`: close the connection.
     /// One message, parsed from the worker's shared read buffer: local requests are applied
     /// without any copy; a scrape across shards continues in a separate task.
-    pub fn handle_message(self: &Rc<Self>, conn: ConnId, frame: &[u8]) -> Result<(), ProtoError> {
+    /// A connection's first message may move it (`Handled::Move`, nothing applied yet).
+    pub fn handle_message(
+        self: &Rc<Self>,
+        conn: ConnId,
+        frame: &[u8],
+    ) -> Result<Handled, ProtoError> {
         let message = <wt_proto::DefaultBackend as wt_proto::Backend>::parse(frame)?;
-        if let Some(job) = self.route_message(conn, frame, &message)? {
-            let me = self.clone();
-            spawn_local(async move { me.scrape(conn, job).await });
+        let first = {
+            let mut conns = self.conns.borrow_mut();
+            conns
+                .get_mut(conn_slot(conn))
+                .is_some_and(|entry| !std::mem::replace(&mut entry.placed, true))
+        };
+        match self.route_message(conn, frame, &message, first)? {
+            Routed::Done => {}
+            Routed::Scrape(job) => {
+                let me = self.clone();
+                spawn_local(async move { me.scrape(conn, job).await });
+            }
+            Routed::Move(worker) => return Ok(Handled::Move(worker)),
         }
-        Ok(())
+        Ok(Handled::Done)
     }
 
-    /// Routes a parsed message; returns a scrape to gather across shards.
+    /// Routes a parsed message. `first`: the connection's first message.
     fn route_message(
         self: &Rc<Self>,
         conn: ConnId,
         frame: &[u8],
         message: &Message<'_>,
-    ) -> Result<Option<ScrapeJob>, ProtoError> {
+        first: bool,
+    ) -> Result<Routed, ProtoError> {
         let workers = self.shared.workers;
 
         if let Message::Scrape { info_hashes } = message {
             return match info_hashes {
                 Some(hashes) if hashes.len() == 1 && workers > 1 => {
-                    let shard = self.shard_of(&hashes[0]);
-                    self.route(shard, conn, frame, message).map(|_| None)
+                    let shard = self.owner(&hashes[0]).unwrap_or(self.id);
+                    self.route(shard, conn, frame, message)
+                        .map(|_| Routed::Done)
                 }
-                _ if workers == 1 => self.apply_local(conn, message).map(|_| None),
-                _ => Ok(Some(
+                _ if workers == 1 => self.apply_local(conn, message).map(|_| Routed::Done),
+                _ => Ok(Routed::Scrape(
                     info_hashes
                         .as_ref()
                         .map(|hashes| hashes.iter().map(|h| h.to_vec()).collect()),
@@ -293,21 +409,30 @@ impl Worker {
         }
 
         match message.route_info_hash() {
-            Some(info_hash) => {
-                let shard = self.shard_of(info_hash.as_bytes());
-                if matches!(message, Message::Announce { .. }) {
-                    let mut conns = self.conns.borrow_mut();
-                    if let Some(entry) = conns.get_mut(conn_slot(conn)) {
-                        entry.shard_mask |= 1 << shard;
-                    }
+            Some(info_hash) if matches!(message, Message::Announce { .. }) => {
+                let shard = self.announce_shard(info_hash.as_bytes(), first);
+                if first && shard != self.id && !self.hashed() {
+                    return Ok(Routed::Move(shard));
                 }
-                self.route(shard, conn, frame, message).map(|_| None)
+                let mut conns = self.conns.borrow_mut();
+                if let Some(entry) = conns.get_mut(conn_slot(conn)) {
+                    entry.shard_mask |= 1 << shard;
+                }
+                drop(conns);
+                self.route(shard, conn, frame, message)
+                    .map(|_| Routed::Done)
+            }
+            // No swarm anywhere (`content`): the local shard gives the same outcome.
+            Some(info_hash) => {
+                let shard = self.owner(info_hash.as_bytes()).unwrap_or(self.id);
+                self.route(shard, conn, frame, message)
+                    .map(|_| Routed::Done)
             }
             // A stop that cannot match anything.
-            None if matches!(message, Message::Stop { .. }) => Ok(None),
+            None if matches!(message, Message::Stop { .. }) => Ok(Routed::Done),
             // An answer without a usable info_hash: fine with one shard (JS semantics), but it
             // cannot be routed between shards (JS multi-worker rejects it too).
-            None if workers == 1 => self.apply_local(conn, message).map(|_| None),
+            None if workers == 1 => self.apply_local(conn, message).map(|_| Routed::Done),
             None => Err(ProtoError::BadField("info_hash")),
         }
     }
@@ -320,8 +445,10 @@ impl Worker {
         message: &Message<'_>,
     ) -> Result<(), ProtoError> {
         if shard == self.id {
+            self.local_requests.set(self.local_requests.get() + 1);
             self.apply_local(conn, message)
         } else {
+            self.remote_requests.set(self.remote_requests.get() + 1);
             // The frame is in the shared read buffer: one copy for the other worker.
             let message = Box::new(OwnedMessage::copy_from(frame, message));
             self.push_remote(shard, Event::Request { conn, message });
@@ -355,7 +482,7 @@ impl Worker {
         }
     }
 
-    fn push_remote(self: &Rc<Self>, worker: usize, event: Event) {
+    pub(crate) fn push_remote(self: &Rc<Self>, worker: usize, event: Event) {
         self.outbox.borrow_mut()[worker].push(event);
         if !self.flush_scheduled.replace(true) {
             let me = self.clone();
@@ -389,6 +516,13 @@ impl Worker {
                 for event in events {
                     match event {
                         Event::Request { conn, message } => {
+                            let misrouted = self.misrouted(&shard, &message.message());
+                            if let Some(owner) = misrouted {
+                                // Rare: the binding changed while the request was in flight.
+                                self.push_remote(owner, Event::Request { conn, message });
+                                self.track(conn, owner);
+                                continue;
+                            }
                             if wt_proto::apply(
                                 &mut shard,
                                 now,
@@ -410,13 +544,12 @@ impl Worker {
                             let _ = reply.send(scrape_entries(&shard, info_hashes.as_deref()));
                         }
                         Event::Stats { reply } => {
-                            let _ = reply.send(
-                                shard
-                                    .swarms()
-                                    .map(|(h, s)| (h.as_bytes().to_vec(), s.peers))
-                                    .collect(),
-                            );
+                            let _ = reply.send(self.shard_stats(&shard));
                         }
+                        Event::Adopt(adopt) => {
+                            spawn_local(conn::adopted(self.clone(), *adopt));
+                        }
+                        Event::Track { conn, shard } => self.track(conn, shard),
                     }
                 }
             }
@@ -436,7 +569,8 @@ impl Worker {
             let subset: Option<Vec<Vec<u8>>> = info_hashes.as_ref().map(|hashes| {
                 hashes
                     .iter()
-                    .filter(|h| self.shard_of(h) == shard)
+                    // Unknown hashes (no swarm anywhere) are in no subset: 0 / 0 entries.
+                    .filter(|h| self.owner(h) == Some(shard))
                     .cloned()
                     .collect()
             });
@@ -486,18 +620,41 @@ impl Worker {
         self.dispatch(encoder.take());
     }
 
-    /// `(info_hash, peers)` of all swarms of all shards, per shard (for `/stats.json`).
-    pub async fn stats(self: &Rc<Self>) -> Vec<Vec<(Vec<u8>, u32)>> {
-        let mut per_shard = vec![Vec::new(); self.shared.workers];
+    /// Remembers that `shard` may hold peers of `conn` (on the connection's worker).
+    fn track(self: &Rc<Self>, conn: ConnId, shard: usize) {
+        if conn_worker(conn) != self.id {
+            return self.push_remote(conn_worker(conn), Event::Track { conn, shard });
+        }
+        let mut conns = self.conns.borrow_mut();
+        if let Some(entry) = conns
+            .get_mut(conn_slot(conn))
+            .filter(|e| e.generation == conn_generation(conn))
+        {
+            entry.shard_mask |= 1 << shard;
+        }
+    }
+
+    fn shard_stats(&self, shard: &Shard) -> ShardStats {
+        ShardStats {
+            swarms: shard
+                .swarms()
+                .map(|(h, s)| (h.as_bytes().to_vec(), s.peers))
+                .collect(),
+            local_requests: self.local_requests.get(),
+            remote_requests: self.remote_requests.get(),
+            moved_in: self.moved_in.get(),
+        }
+    }
+
+    /// Swarms and counters of all shards, per shard (for `/stats.json`).
+    pub async fn stats(self: &Rc<Self>) -> Vec<ShardStats> {
+        let mut per_shard: Vec<ShardStats> = (0..self.shared.workers)
+            .map(|_| ShardStats::default())
+            .collect();
         let mut pending = Vec::new();
         for (shard, slot) in per_shard.iter_mut().enumerate() {
             if shard == self.id {
-                *slot = self
-                    .shard
-                    .borrow()
-                    .swarms()
-                    .map(|(h, s)| (h.as_bytes().to_vec(), s.peers))
-                    .collect();
+                *slot = self.shard_stats(&self.shard.borrow());
             } else {
                 let (reply, rx) = oneshot::channel();
                 self.push_remote(shard, Event::Stats { reply });
@@ -520,6 +677,35 @@ impl Worker {
                 encoder.take()
             };
             self.dispatch(batch);
+            self.release_empty();
+        }
+    }
+
+    /// Releases directory entries of this worker without a swarm in its shard (spec §13.3).
+    fn release_empty(&self) {
+        if self.hashed() {
+            return;
+        }
+        let shard = self.shard.borrow();
+        let directory = &self.shared.directory;
+        for key in directory.owned_by(self.id) {
+            if shard.swarm_stats(key.as_bytes()).is_none() {
+                directory.release(&key, self.id);
+            }
+        }
+    }
+
+    /// Publishes how busy this worker's runtime is, for placement.
+    async fn load_ticker(self: Rc<Self>) {
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let (mut last, mut last_busy) = (Instant::now(), metrics.worker_total_busy_duration(0));
+        loop {
+            tokio::time::sleep(placement::LOAD_TICK).await;
+            let (now, busy) = (Instant::now(), metrics.worker_total_busy_duration(0));
+            let wall = now.duration_since(last).as_secs_f64().max(1e-3);
+            let busy_secs = busy.saturating_sub(last_busy).as_secs_f64();
+            (last, last_busy) = (now, busy);
+            self.shared.loads.sample_busy(self.id, busy_secs, wall);
         }
     }
 }
@@ -571,6 +757,9 @@ pub(crate) fn run(
         let me = Rc::new(Worker::new(id, shared, seed));
         spawn_local(me.clone().inbox(inbox));
         spawn_local(me.clone().expiry());
+        if !me.hashed() {
+            spawn_local(me.clone().load_ticker());
+        }
         for listener in listeners {
             let socket = TcpListener::from_std(listener.socket).expect("listener");
             spawn_local(conn::accept_loop(me.clone(), listener.index, socket));

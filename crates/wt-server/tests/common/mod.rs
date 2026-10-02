@@ -25,6 +25,13 @@ pub fn plain(workers: usize) -> Server {
     ))
 }
 
+/// `hash` placement: swarms spread over shards by info_hash (for cross-shard paths).
+pub fn hashed(workers: usize) -> Server {
+    start(&format!(
+        r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0}}}}],"workers":{workers},"placement":"hash"}}"#
+    ))
+}
+
 pub fn url(server: &Server) -> String {
     format!("ws://{}/", server.local_addrs()[0])
 }

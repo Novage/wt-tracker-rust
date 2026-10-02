@@ -19,7 +19,7 @@ const H: [&str; 8] = [
 
 #[tokio::test(flavor = "multi_thread")]
 async fn offers_and_answers_across_workers_and_shards() {
-    let server = plain(4);
+    let server = hashed(4);
     let mut keep = Vec::new();
     for (i, info_hash) in H.iter().enumerate() {
         // Unique peer_ids: reusing one on a new connection would move (re-create) the peer.
@@ -58,7 +58,7 @@ async fn offers_and_answers_across_workers_and_shards() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scrape_merges_shards_in_request_order() {
-    let server = plain(4);
+    let server = hashed(4);
     let mut clients = Vec::new();
     for (i, info_hash) in H[..6].iter().enumerate() {
         for p in 0..=i {
@@ -126,7 +126,7 @@ async fn scrape_merges_shards_in_request_order() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn disconnect_removes_peers_from_every_shard() {
-    let server = plain(4);
+    let server = hashed(4);
     let mut ws = connect(&server).await;
     for (i, info_hash) in H.iter().enumerate() {
         // Several peer_ids on one connection, in swarms of different shards.
@@ -178,7 +178,7 @@ async fn binary_fragmented_and_pipelined_frames() {
 #[tokio::test(flavor = "multi_thread")]
 async fn answer_without_info_hash_needs_a_single_shard() {
     for (workers, delivered) in [(1, true), (2, false)] {
-        let server = plain(workers);
+        let server = hashed(workers);
         let (mut a, mut b) = (connect(&server).await, connect(&server).await);
         send(&mut a, &announce(H[0], "pa", 0)).await;
         recv(&mut a).await.unwrap();

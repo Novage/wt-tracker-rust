@@ -3,8 +3,11 @@
 # wss://, with the same load generator (crates/wt-loadgen). Also a wire smoke check (same
 # messages from both servers). Writes bench/results/load.json and regenerates spec §11.
 #
-# Two load profiles (env overrides): light = LIGHT_CONNS=3000 conns re-announcing every 5 s (ws
-# and wss); heavy = HEAVY_CONNS=4000 conns every 1 s (ws). SWARMS=100 DURATION=15 RAMP=1000.
+# Three load profiles (env overrides): light = LIGHT_CONNS=3000 conns re-announcing every 5 s (ws
+# and wss); heavy = HEAVY_CONNS=4000 conns every 1 s (ws); media = MEDIA_CONNS=3000 conns in a
+# video and an audio swarm of their content, switching between 4 video qualities every 10 s
+# (old quality stopped after 5 s), re-announcing every 5 s (ws). SWARMS=100 DURATION=15
+# RAMP=1000. After each run the server's /stats.json "placement" is kept (Local % column).
 # On macOS keep conns below ~12000 (ephemeral ports per destination). The client shares the
 # machine with the server.
 set -euo pipefail
@@ -13,11 +16,16 @@ cd "$(dirname "$0")/.."
 WT_TRACKER_DIR=${WT_TRACKER_DIR:-../wt-tracker}
 LIGHT_CONNS=${LIGHT_CONNS:-3000}
 HEAVY_CONNS=${HEAVY_CONNS:-4000}
+MEDIA_CONNS=${MEDIA_CONNS:-3000}
 SWARMS=${SWARMS:-100}
 DURATION=${DURATION:-15}
 RAMP=${RAMP:-1000}
-# profile|conns|interval|protocols
-PROFILES=("light|$LIGHT_CONNS|5|ws wss" "heavy|$HEAVY_CONNS|1|ws")
+# profile|conns|interval|protocols|extra load generator options
+PROFILES=(
+  "light|$LIGHT_CONNS|5|ws wss|"
+  "heavy|$HEAVY_CONNS|1|ws|"
+  "media|$MEDIA_CONNS|5|ws|--streams 2 --qualities 4 --switch 10 --overlap 5"
+)
 WS_PORT=18100
 WSS_PORT=18443
 OUT=target/loadtest
@@ -27,9 +35,10 @@ cargo build --release -q -p wt-server -p wt-loadgen
 mkdir -p "$OUT" bench/results
 ./target/release/wt-loadgen gen-cert "$OUT"
 
-config() { # $1 = workers ("" = default)
+config() { # $1 = workers ("" = default), $2 = placement ("" = default)
   local workers=""
   [ -n "$1" ] && workers=",\"workers\":$1"
+  [ -n "${2:-}" ] && workers="$workers,\"placement\":\"$2\""
   cat <<EOF
 {"servers":[
   {"server":{"host":"127.0.0.1","port":$WS_PORT},"websockets":{"compression":0}},
@@ -39,6 +48,7 @@ EOF
 }
 config 1 > "$OUT/config-1.json"
 config "" > "$OUT/config-n.json"
+config "" hash > "$OUT/config-n-hash.json"
 
 wait_port() {
   for _ in $(seq 100); do
@@ -66,11 +76,12 @@ declare -a TARGETS=(
   "js-workers|node $WT_TRACKER_DIR/src/run-worker-tracker.ts $OUT/config-1.json"
   "rust-1|./target/release/wt-tracker $OUT/config-1.json"
   "rust-n|./target/release/wt-tracker $OUT/config-n.json"
+  "rust-n-hash|./target/release/wt-tracker $OUT/config-n-hash.json"
 )
 
 rm -f "$OUT"/run-*.json
 for profile in "${PROFILES[@]}"; do
-  IFS='|' read -r pname conns interval protos <<< "$profile"
+  IFS='|' read -r pname conns interval protos extra <<< "$profile"
   for target in "${TARGETS[@]}"; do
     name=${target%%|*}
     command=${target#*|}
@@ -83,9 +94,20 @@ for profile in "${PROFILES[@]}"; do
         stop_server
         continue
       fi
+      run="$OUT/run-$pname-$name-$proto.json"
+      # shellcheck disable=SC2086
       ./target/release/wt-loadgen load --url "$url" --ca "$OUT/cert.pem" --conns "$conns" --swarms "$SWARMS" \
-        --interval "$interval" --duration "$DURATION" --ramp "$RAMP" --server-pid "$SERVER_PID" \
-        --label "$pname $name $proto" > "$OUT/run-$pname-$name-$proto.json" || echo "   load generator failed" >&2
+        --interval "$interval" --duration "$DURATION" --ramp "$RAMP" --server-pid "$SERVER_PID" $extra \
+        --label "$pname $name $proto" > "$run" || echo "   load generator failed" >&2
+      # Rust only: where requests were applied (local vs another worker's shard).
+      curl -s "http://127.0.0.1:$WS_PORT/stats.json" > "$OUT/stats.json" || true
+      node -e '
+const fs = require("fs"), [run, stats] = process.argv.slice(1);
+try {
+  const p = JSON.parse(fs.readFileSync(stats)).placement, r = JSON.parse(fs.readFileSync(run));
+  if (p) fs.writeFileSync(run, JSON.stringify({ ...r, placement: p }, null, 2));
+} catch {}
+' "$run" "$OUT/stats.json"
       stop_server
     done
   done

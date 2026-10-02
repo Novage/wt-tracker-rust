@@ -1,9 +1,12 @@
 //! Accepting connections: TLS (on shared buffers), the HTTP request head, routes, and the
 //! WebSocket upgrade into the connection driver (spec §13.2).
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
+
+use bytes::Bytes;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::spawn_local;
@@ -12,9 +15,9 @@ use wt_core::ConnId;
 
 use crate::http;
 use crate::stats;
-use crate::worker::{Pop, Worker};
+use crate::worker::{Event, Handled, Pop, Worker};
 use crate::ws::codec::close;
-use crate::ws::driver::{self, Endpoint, Io, Limits};
+use crate::ws::driver::{self, Endpoint, Flow, Io, Limits, Parked};
 
 /// TLS handshake + HTTP request head must complete within this time.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,22 +54,27 @@ async fn serve(me: Rc<Worker>, listener: usize, stream: TcpStream) {
             if io.write_all(response.as_bytes()).await.is_err() {
                 return;
             }
-            let limits = Limits {
-                max_payload: info.websockets.max_payload_length,
-                idle: Duration::from_secs(info.websockets.idle_timeout),
-            };
             info.web_sockets.fetch_add(1, Relaxed);
-            let (conn, notify, closed) = me.register();
-            let endpoint = TrackerEndpoint {
-                me: me.clone(),
-                conn,
-                notify,
-                closed,
-            };
-            driver::run(io, rest, limits, &endpoint).await;
-            me.begin_close(conn);
-            me.remove(conn);
-            info.web_sockets.fetch_sub(1, Relaxed);
+            let endpoint = TrackerEndpoint::new(&me, false);
+            let parked = driver::run(io, rest, limits(&me, listener), &endpoint).await;
+            let conn = endpoint.conn;
+            match (parked, endpoint.moving.take()) {
+                // Moved before anything was applied: no shard holds the connection.
+                (Some(parked), Some((worker, first))) => {
+                    me.remove(conn);
+                    let adopt = Adopt {
+                        listener,
+                        first,
+                        parked,
+                    };
+                    me.push_remote(worker, Event::Adopt(Box::new(adopt)));
+                }
+                _ => {
+                    me.begin_close(conn);
+                    me.remove(conn);
+                    info.web_sockets.fetch_sub(1, Relaxed);
+                }
+            }
         }
         Route::Respond(bytes) => {
             let _ = io.write_all(&bytes).await;
@@ -74,6 +82,40 @@ async fn serve(me: Rc<Worker>, listener: usize, stream: TcpStream) {
         }
         Route::Drop => {}
     }
+}
+
+fn limits(me: &Worker, listener: usize) -> Limits {
+    let ws = &me.shared.listeners[listener].websockets;
+    Limits {
+        max_payload: ws.max_payload_length,
+        idle: Duration::from_secs(ws.idle_timeout),
+    }
+}
+
+/// A connection moving to another worker at its first message (spec §13.3).
+pub(crate) struct Adopt {
+    listener: usize,
+    /// The message that moved it, handled first by the new worker.
+    first: Bytes,
+    parked: Parked,
+}
+
+/// Continues a connection that moved to this worker.
+pub(crate) async fn adopted(me: Rc<Worker>, adopt: Adopt) {
+    let endpoint = TrackerEndpoint::new(&me, true);
+    let limits = limits(&me, adopt.listener);
+    // Placed connections never detach again; a parked result would be dropped (closed).
+    let Adopt {
+        listener,
+        first,
+        parked,
+    } = adopt;
+    let _ = driver::resume(parked, first, limits, &endpoint).await;
+    me.begin_close(endpoint.conn);
+    me.remove(endpoint.conn);
+    me.shared.listeners[listener]
+        .web_sockets
+        .fetch_sub(1, Relaxed);
 }
 
 /// What to do with a request head (spec §13.2).
@@ -126,13 +168,33 @@ struct TrackerEndpoint {
     conn: ConnId,
     notify: Rc<tokio::sync::Notify>,
     closed: Rc<tokio::sync::Notify>,
+    /// Set when the first message moves the connection: target worker and the message.
+    moving: RefCell<Option<(usize, Bytes)>>,
+}
+
+impl TrackerEndpoint {
+    fn new(me: &Rc<Worker>, placed: bool) -> Self {
+        let (conn, notify, closed) = me.register(placed);
+        Self {
+            me: me.clone(),
+            conn,
+            notify,
+            closed,
+            moving: RefCell::new(None),
+        }
+    }
 }
 
 impl Endpoint for TrackerEndpoint {
-    fn message(&self, _text: bool, data: &[u8]) -> Result<(), u16> {
-        self.me
-            .handle_message(self.conn, data)
-            .map_err(|_| close::POLICY)
+    fn message(&self, _text: bool, data: &[u8]) -> Result<Flow, u16> {
+        match self.me.handle_message(self.conn, data) {
+            Ok(Handled::Done) => Ok(Flow::Continue),
+            Ok(Handled::Move(worker)) => {
+                *self.moving.borrow_mut() = Some((worker, Bytes::copy_from_slice(data)));
+                Ok(Flow::Detach)
+            }
+            Err(_) => Err(close::POLICY),
+        }
     }
     fn pop(&self) -> Pop {
         self.me.pop(self.conn)

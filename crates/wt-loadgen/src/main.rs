@@ -4,6 +4,7 @@
 //! ```text
 //! wt-loadgen load  --url ws://127.0.0.1:8000/ [--conns 5000] [--swarms 100] [--offers 10]
 //!                  [--interval 5] [--ramp 1000] [--duration 30] [--threads N] [--ca cert.pem]
+//!                  [--streams 1] [--qualities 1] [--switch 0] [--overlap 5]
 //!                  [--server-pid PID] [--label NAME]           → JSON report on stdout
 //! wt-loadgen smoke --url ws://127.0.0.1:8000/ [--ca cert.pem]  → JSON transcript on stdout
 //! wt-loadgen gen-cert DIR                                       → DIR/cert.pem, DIR/key.pem
@@ -106,16 +107,18 @@ struct Counters {
     replies: AtomicU64,
     offers: AtomicU64,
     answers: AtomicU64,
+    sent_stops: AtomicU64,
 }
 
 impl Counters {
-    fn snapshot(&self) -> [u64; 5] {
+    fn snapshot(&self) -> [u64; 6] {
         [
             self.sent_announces.load(Relaxed),
             self.sent_answers.load(Relaxed),
             self.replies.load(Relaxed),
             self.offers.load(Relaxed),
             self.answers.load(Relaxed),
+            self.sent_stops.load(Relaxed),
         ]
     }
 }
@@ -126,6 +129,13 @@ struct Load {
     swarms: usize,
     offers: Vec<Vec<String>>,
     interval: Duration,
+    /// Swarms per client of its content (stream 0 = video, the others e.g. audio).
+    streams: usize,
+    /// Qualities of stream 0; a switch moves to the next one.
+    qualities: usize,
+    /// Quality switch period (zero: never) and how long the old swarm is kept.
+    switch: Duration,
+    overlap: Duration,
     counters: Counters,
     rtt: Mutex<Histogram<u64>>,
     failures: Mutex<std::collections::BTreeMap<String, u64>>,
@@ -144,40 +154,81 @@ async fn client(load: Arc<Load>, n: usize) {
     };
     load.counters.connected.fetch_add(1, Relaxed);
     let peer_id = id('c', n);
-    let info_hash = id('h', n % load.swarms);
+    let content = n % load.swarms;
+    // Every (content, stream, quality) is its own swarm; one stream and quality = one swarm
+    // per content, as without these options.
+    let stream_hash = |stream: usize, quality: usize| {
+        id(
+            'h',
+            (content * load.streams + stream) * load.qualities + quality,
+        )
+    };
+    let mut quality = 0;
+    let mut hashes: Vec<String> = (0..load.streams).map(|k| stream_hash(k, 0)).collect();
     let offers = &load.offers[n % load.offers.len()];
     let answer_sdp = sdp_json(1_000_000 + n);
     let mut stop = load.stop.clone();
 
     let mut pending: Option<Instant> = Some(Instant::now());
-    if ws
-        .send(Message::text(announce(
-            &info_hash,
-            &peer_id,
-            Some("started"),
-            offers,
-        )))
-        .await
-        .is_err()
-    {
-        load.counters.closed_early.fetch_add(1, Relaxed);
-        return;
+    for info_hash in &hashes {
+        let message = announce(info_hash, &peer_id, Some("started"), offers);
+        if ws.send(Message::text(message)).await.is_err() {
+            load.counters.closed_early.fetch_add(1, Relaxed);
+            return;
+        }
+        load.counters.sent_announces.fetch_add(1, Relaxed);
     }
-    load.counters.sent_announces.fetch_add(1, Relaxed);
-    // Spread re-announces over the interval.
-    let first = load.interval.mul_f64((n % 1000) as f64 / 1000.0);
-    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + first, load.interval);
+    // Spread re-announces (and switches) over their periods.
+    let spread = (n % 1000) as f64 / 1000.0;
+    let now = tokio::time::Instant::now();
+    let mut tick = tokio::time::interval_at(now + load.interval.mul_f64(spread), load.interval);
+    let switch_every = if load.switch.is_zero() {
+        Duration::from_secs(1 << 30)
+    } else {
+        load.switch
+    };
+    let mut switch =
+        tokio::time::interval_at(now + switch_every.mul_f64(spread.max(0.001)), switch_every);
+    // Old qualities to stop: (deadline, info_hash).
+    let mut stops: std::collections::VecDeque<(tokio::time::Instant, String)> = Default::default();
+    let far = || tokio::time::Instant::now() + Duration::from_secs(1 << 30);
 
     loop {
+        let next_stop = stops.front().map_or_else(far, |(at, _)| *at);
         tokio::select! {
             _ = stop.changed() => break,
             _ = tick.tick() => {
                 pending.get_or_insert_with(Instant::now);
-                if ws.send(Message::text(announce(&info_hash, &peer_id, None, offers))).await.is_err() {
+                for info_hash in &hashes {
+                    if ws.send(Message::text(announce(info_hash, &peer_id, None, offers))).await.is_err() {
+                        load.counters.closed_early.fetch_add(1, Relaxed);
+                        return;
+                    }
+                    load.counters.sent_announces.fetch_add(1, Relaxed);
+                }
+            }
+            _ = switch.tick(), if !load.switch.is_zero() && load.qualities > 1 => {
+                quality = (quality + 1) % load.qualities;
+                let old = std::mem::replace(&mut hashes[0], stream_hash(0, quality));
+                stops.push_back((tokio::time::Instant::now() + load.overlap, old));
+                let message = announce(&hashes[0], &peer_id, Some("started"), offers);
+                if ws.send(Message::text(message)).await.is_err() {
                     load.counters.closed_early.fetch_add(1, Relaxed);
                     return;
                 }
                 load.counters.sent_announces.fetch_add(1, Relaxed);
+            }
+            _ = tokio::time::sleep_until(next_stop), if !stops.is_empty() => {
+                let (_, old) = stops.pop_front().unwrap();
+                // Back to an old quality within the overlap: it is still in use.
+                if !hashes.contains(&old) {
+                    let message = announce(&old, &peer_id, Some("stopped"), &[]);
+                    if ws.send(Message::text(message)).await.is_err() {
+                        load.counters.closed_early.fetch_add(1, Relaxed);
+                        return;
+                    }
+                    load.counters.sent_stops.fetch_add(1, Relaxed);
+                }
             }
             message = ws.next() => {
                 let message = match message {
@@ -209,8 +260,10 @@ async fn client(load: Arc<Load>, n: usize) {
                     }
                 } else if text.contains("\"offer\":{") {
                     load.counters.offers.fetch_add(1, Relaxed);
-                    if let (Some(from), Some(offer_id)) = (field(&text, "peer_id"), field(&text, "offer_id")) {
-                        let reply = answer(&info_hash, &peer_id, from, offer_id, &answer_sdp);
+                    if let (Some(info_hash), Some(from), Some(offer_id)) =
+                        (field(&text, "info_hash"), field(&text, "peer_id"), field(&text, "offer_id"))
+                    {
+                        let reply = answer(info_hash, &peer_id, from, offer_id, &answer_sdp);
                         if ws.send(Message::text(reply)).await.is_err() {
                             load.counters.closed_early.fetch_add(1, Relaxed);
                             return;
@@ -232,8 +285,17 @@ fn process_usage(pid: u32) -> Option<(f64, u64)> {
         let fields: Vec<&str> = stat.rsplit(')').next()?.split_whitespace().collect();
         let ticks: f64 =
             fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
-        let rss_pages: u64 = fields.get(21)?.parse().ok()?;
-        return Some((ticks / 100.0, rss_pages * 4096));
+        // VmRSS: independent of the page size.
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let kb: u64 = status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))?
+            .trim()
+            .trim_end_matches("kB")
+            .trim()
+            .parse()
+            .ok()?;
+        return Some((ticks / 100.0, kb * 1024));
     }
     let out = std::process::Command::new("ps")
         .args(["-o", "rss=,time=", "-p", &pid.to_string()])
@@ -258,6 +320,10 @@ async fn run_load(args: Vec<String>) -> Value {
     let interval = Duration::from_secs_f64(num(&args, "--interval", 5.0));
     let ramp: usize = num(&args, "--ramp", 1000);
     let duration = Duration::from_secs_f64(num(&args, "--duration", 30.0));
+    let streams: usize = num(&args, "--streams", 1usize).max(1);
+    let qualities: usize = num(&args, "--qualities", 1usize).max(1);
+    let switch = Duration::from_secs_f64(num(&args, "--switch", 0.0));
+    let overlap = Duration::from_secs_f64(num(&args, "--overlap", 5.0));
     let server_pid: Option<u32> =
         arg(&args, "--server-pid").map(|p| p.parse().expect("--server-pid"));
 
@@ -281,12 +347,19 @@ async fn run_load(args: Vec<String>) -> Value {
         swarms,
         offers,
         interval,
+        streams,
+        qualities,
+        switch,
+        overlap,
         counters: Counters::default(),
         rtt: Mutex::new(Histogram::new(3).unwrap()),
         failures: Mutex::default(),
         measuring: false.into(),
         stop,
     });
+
+    // Server memory before any connection (fixed costs: runtimes, preallocated buffers).
+    let idle_rss = server_pid.and_then(process_usage).map(|(_, rss)| rss);
 
     // Evenly paced connects: bursts overflow small listen backlogs (macOS somaxconn = 128).
     let mut pace = tokio::time::interval(Duration::from_secs_f64(1.0 / ramp.max(1) as f64));
@@ -322,10 +395,10 @@ async fn run_load(args: Vec<String>) -> Value {
         let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
     }
 
-    let d: Vec<f64> = (0..5)
+    let d: Vec<f64> = (0..6)
         .map(|i| (after[i] - before[i]) as f64 / elapsed)
         .collect();
-    let sent = d[0] + d[1];
+    let sent = d[0] + d[1] + d[5];
     let received = d[2] + d[3] + d[4];
     let rtt = load.rtt.lock().unwrap();
     let ms = |q: f64| rtt.value_at_quantile(q) as f64 / 1000.0;
@@ -338,6 +411,9 @@ async fn run_load(args: Vec<String>) -> Value {
                 "cpu_us_per_message": if sent + received > 0.0 { cores * 1e6 / (sent + received) } else { 0.0 },
                 "rss_bytes": rss,
                 "rss_bytes_per_conn": rss as f64 / connected.max(1) as f64,
+                "rss_idle_bytes": idle_rss,
+                "rss_bytes_per_conn_above_idle": idle_rss
+                    .map(|idle| rss.saturating_sub(idle) as f64 / connected.max(1) as f64),
             })
         }
         _ => Value::Null,
@@ -352,10 +428,15 @@ async fn run_load(args: Vec<String>) -> Value {
         "closed_early": load.counters.closed_early.load(Relaxed),
         "swarms": swarms,
         "offers": offers_per,
+        "streams": streams,
+        "qualities": qualities,
+        "switch_s": switch.as_secs_f64(),
+        "overlap_s": overlap.as_secs_f64(),
         "interval_s": interval.as_secs_f64(),
         "duration_s": elapsed,
         "per_second": {
             "announces": d[0], "answers_sent": d[1], "replies": d[2], "offers": d[3], "answers_received": d[4],
+            "stops": d[5],
             "sent": sent, "received": received,
         },
         "rtt_ms": { "p50": ms(0.5), "p99": ms(0.99), "max": rtt.max() as f64 / 1000.0, "samples": rtt.len() },

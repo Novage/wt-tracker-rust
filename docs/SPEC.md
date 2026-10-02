@@ -29,17 +29,19 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 - **Payload-agnostic:** `Request<'a, O>` and `Outbox<O>` are generic over the offer/answer payload
   `O`. The core never inspects it, only passes references through. The protocol layer will use
   `Bytes` slices of the received frame, so SDPs are never copied or re-escaped.
-- **Sharding:** the server runs N shards (one per worker), routing each request by
-  `hash(info_hash) % N` (§13.3). Every request carries `info_hash`, so answers route without a
-  global peer table.
+- **Sharding:** the server runs N shards (one per worker). Each info_hash belongs to one shard,
+  found in a global directory (`content` placement: the swarms of one piece of content share a
+  shard and connections move to it) or by `hash(info_hash) % N` (`hash` placement) (§13.3).
+  Every request carries `info_hash`, so answers route without a global peer table.
 
 | Crate / dir | Purpose |
 |---|---|
 | `crates/wt-core` | `Shard`, `Key`, `Request`, `Outbox`, `Settings` |
 | `crates/wt-proto` | wire protocol: `handle`, parser backends, `Encoder` (§7) |
-| `crates/wt-server` | the server, binary `wt-tracker` (§13); `src/ws/` own WebSocket framing (`codec`) and connection driver (`driver`); `echo` + `examples/ws-echo.rs` echo server for conformance testing |
+| `crates/wt-server` | the server, binary `wt-tracker` (§13); `src/ws/` own WebSocket framing (`codec`) and connection driver (`driver`); `placement` info_hash directory, worker loads and placement choices (§13.3); `echo` + `examples/ws-echo.rs` echo server for conformance testing |
 | `crates/wt-loadgen`, `loadtest/run.sh` | load generator, wire smoke check, JS vs Rust load test (§14) |
 | `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss (§9) |
+| `loadtest/aquatic.sh`, `loadtest/aquatic/` | load test against aquatic_ws in a Linux container (§14) |
 | `crates/wt-core/tests` | ported JS tests, behaviour tests, model-based proptest |
 | `crates/wt-bench` | `wt-bench` (timing + scaling), `wt-bench-mem` (memory) |
 | `crates/wt-difftest`, `difftest/run.ts` | wire-level differential test: same random frame traces through the JS tracker and Rust `wt-proto` + `Shard` |
@@ -294,7 +296,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | permessage-deflate (`compression` > 0) | negotiated by uWebSockets | not negotiated (warning at startup) | not implemented in the own framing |
 | Answer without a string `info_hash`, several workers | single tracker: delivered; multi-worker: error | 1 worker: delivered; > 1: `BadField("info_hash")` → close | cannot be routed to a shard |
 | Answer target only in a swarm of another shard | delivered (one global peer table) | `UnknownPeer` → close | per-shard peer tables; real answers target a member of the same swarm |
-| `/stats.json` `memory` | `process.memoryUsage()` | `{ "rss": bytes }`; extra `workers`, `droppedMessages` | |
+| `/stats.json` `memory` | `process.memoryUsage()` | `{ "rss": bytes }`; extra `workers`, `droppedMessages`, `placement` | |
 | Slow receivers | uWS buffers up to its backpressure limit | messages beyond `maxBackpressure` (1 MiB) per connection are dropped | bounded memory |
 | Peer identity | global per tracker (per worker in multi-worker) | per shard | sharding |
 | Stop from another connection | allowed | allowed (parity) | hardening is planned (§12) |
@@ -349,7 +351,19 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   cleanup across shards, bad / oversized / invalid-UTF-8 frames close and remove peers, binary,
   fragmented and pipelined (same packet as the handshake) frames, the multi-shard answer rule,
   idle timeout with pings, HTTP routes and ws path, origin rules, `maxConnections`, wss with a
-  generated certificate, backpressure drops; `ConnId` packing unit test.
+  generated certificate, backpressure drops; `ConnId` packing unit test. Tests that need swarms
+  spread over shards use `placement: "hash"`.
+- `tests/placement.rs` (4 workers, `content` placement, shards read from `/stats.json`): one
+  swarm on one shard with every request local; video + audio of a connection on one shard with
+  an offer / answer; a quality switch (new hash, stop of the old) on the same shard; a connection
+  whose first message is a scrape is not moved and forwards; a ping before and messages after
+  the first announce in the same packet move with the connection (pong and replies in order);
+  moving wss connections keep their TLS session (several messages per TLS write, 57 KB offers
+  afterwards); 50 concurrent first announces of new content bind one shard; an emptied swarm's
+  binding is released at the expiry tick and can bind again. Moves are forced by a crowd of
+  pinned idle connections (new content avoids the crowded worker), so they happen however the
+  OS spreads accepts. `placement.rs` unit tests: claim / release semantics, 8 threads claiming
+  1000 hashes concurrently (one owner each), the placement choices, busy averaging.
 - WebSocket framing: `ws/codec.rs` unit tests (RFC 6455 example frame, every length boundary at
   every split point, protocol errors and close codes, fragment reassembly and misuse, unmasking)
   and a property test with tungstenite as the oracle: random messages (incl. the 125/126 and
@@ -460,23 +474,55 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
 ### Load test (end to end, `loadtest/run.sh`)
 
 - {"cpu":"Apple M1","cores":8,"os":"darwin 27.0.0","node":"v26.3.0"}; client and server on the same machine.
-- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. JS with `compression: 0` (Rust does not negotiate permessage-deflate). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers.
+- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. JS with `compression: 0` (Rust does not negotiate permessage-deflate). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers, `rust-n-hash` = all-core workers with `placement: "hash"`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Local % = requests applied on the connection's own worker (Rust).
 - Wire smoke check (same messages from JS and Rust): **yes**.
 
-| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB | RSS KiB / conn | RTT p50 / p99 ms |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| light js ws | 3000 (3000) | 5 s | 0 | 19,211 | 0.37 | 19.0 | 84.0 | 28.7 | 0.48 / 1.97 |
-| light js wss | 3000 (3000) | 5 s | 0 | 19,207 | 0.38 | 19.7 | 34.7 | 11.8 | 0.54 / 1.98 |
-| light js-workers ws | 3000 (2983) | 5 s | 17 | 19,098 | 0.76 | 39.8 | 181.9 | 62.4 | 0.49 / 1.74 |
-| light js-workers wss | 3000 (2954) | 5 s | 46 | 18,912 | 0.78 | 41.5 | 199.3 | 69.1 | 0.51 / 1.83 |
-| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,214 | 0.24 | 12.6 | 14.3 | 4.9 | 0.26 / 1.59 |
-| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,217 | 0.29 | 15.2 | 23.9 | 8.2 | 0.29 / 1.67 |
-| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,213 | 0.40 | 21.0 | 19.1 | 6.5 | 0.39 / 1.97 |
-| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,206 | 0.46 | 23.9 | 27.0 | 9.2 | 0.42 / 1.74 |
-| heavy js ws | 4000 (4000) | 1 s | 0 | 128,063 | 0.68 | 5.3 | 71.3 | 18.3 | 0.49 / 1.46 |
-| heavy js-workers ws | 4000 (3951) | 1 s | 49 | 126,376 | 1.22 | 9.7 | 305.6 | 79.2 | 264.70 / 545.79 |
-| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 128,054 | 0.51 | 3.9 | 25.1 | 6.4 | 0.31 / 1.64 |
-| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,051 | 1.33 | 10.4 | 26.7 | 6.8 | 0.46 / 1.95 |
+| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| light js ws | 3000 (3000) | 5 s | 0 | 19,219 | 0.37 | 19.0 | 69.5 | 23.7 | 0.46 / 7.02 | – |
+| light js wss | 3000 (3000) | 5 s | 0 | 19,205 | 0.36 | 18.6 | 74.3 | 25.3 | 0.49 / 2.80 | – |
+| light js-workers ws | 3000 (3000) | 5 s | 0 | 19,209 | 0.70 | 36.6 | 166.7 | 56.9 | 0.47 / 2.21 | – |
+| light js-workers wss | 3000 (2982) | 5 s | 18 | 19,092 | 0.73 | 38.1 | 181.0 | 62.1 | 0.49 / 5.57 | – |
+| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,209 | 0.23 | 11.8 | 14.9 | 5.1 | 0.25 / 1.61 | 100.0 |
+| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,211 | 0.26 | 13.8 | 23.5 | 8.0 | 0.28 / 2.41 | 100.0 |
+| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,211 | 0.25 | 12.8 | 14.8 | 5.1 | 0.25 / 1.34 | 100.0 |
+| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,214 | 0.33 | 17.0 | 26.6 | 9.1 | 0.33 / 2.71 | 100.0 |
+| light rust-n-hash ws | 3000 (3000) | 5 s | 0 | 19,211 | 0.44 | 23.0 | 16.2 | 5.5 | 0.44 / 2.54 | 16.9 |
+| light rust-n-hash wss | 3000 (3000) | 5 s | 0 | 19,216 | 0.35 | 18.0 | 26.6 | 9.1 | 0.39 / 271.62 | 10.8 |
+| heavy js ws | 4000 (4000) | 1 s | 0 | 123,217 | 0.68 | 5.5 | 50.4 | 12.9 | 0.67 / 412.67 | – |
+| heavy js-workers ws | 4000 (3856) | 1 s | 3572 | 60,680 | 0.86 | 14.1 | 214.9 | 57.1 | 388.86 / 3706.88 | – |
+| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 128,724 | 0.52 | 4.0 | 55.3 | 14.2 | 0.29 / 32.24 | 100.0 |
+| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,074 | 0.65 | 5.1 | 23.8 | 6.1 | 0.29 / 1.84 | 100.0 |
+| heavy rust-n-hash ws | 4000 (4000) | 1 s | 0 | 128,073 | 1.36 | 10.6 | 36.1 | 9.2 | 0.49 / 2.90 | 15.1 |
+| media js ws | 3000 (3000) | 5 s | 0 | 46,631 | 0.50 | 10.8 | 70.5 | 24.1 | 0.64 / 3.14 | – |
+| media js-workers ws | 3000 (2926) | 5 s | 74 | 45,426 | 0.87 | 19.1 | 178.0 | 62.3 | 0.64 / 37.53 | – |
+| media rust-1 ws | 3000 (3000) | 5 s | 0 | 46,562 | 0.36 | 7.8 | 20.0 | 6.8 | 0.42 / 2.11 | 100.0 |
+| media rust-n ws | 3000 (3000) | 5 s | 0 | 46,644 | 0.47 | 10.1 | 20.1 | 6.9 | 0.37 / 2.25 | 100.0 |
+| media rust-n-hash ws | 3000 (3000) | 5 s | 0 | 46,632 | 0.80 | 17.1 | 31.9 | 10.9 | 0.48 / 39.74 | 12.3 |
+
+### Load test vs aquatic_ws (Linux container, `loadtest/aquatic.sh`)
+
+- {"where":"Docker Desktop Linux VM","cores":8,"kernel":"Linux 7.0.14-linuxkit aarch64","aquatic_rev":"a2ddc4b323c5aaf844ce32b655b0ffc8c4836cde"}; server and load generator in one container, sharing its CPUs. Same profiles and load generator as above.
+- `aquatic-1` = 1 socket + 1 swarm worker (2 threads), `aquatic-n` = all cores split ¾ socket / ¼ swarm workers (io_uring, glommio, async-tungstenite, mimalloc); `rust-1` / `rust-n` = 1 / all-core workers (`rust-n` with `reusePort`, `content` placement).
+
+| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| light aquatic-1 ws | 3000 (3000) | 5 s | 0 | 25,198 | 0.66 | 26.2 | 266.9 (45.5) | 91.1 (75.6) | 0.69 / 1.68 | – |
+| light aquatic-1 wss | 3000 (3000) | 5 s | 0 | 25,203 | 0.66 | 26.3 | 293.8 (46.5) | 100.3 (84.4) | 0.70 / 1.73 | – |
+| light aquatic-n ws | 3000 (3000) | 5 s | 0 | 25,203 | 1.96 | 77.7 | 394.0 (162.1) | 134.5 (79.2) | 0.68 / 3.83 | – |
+| light aquatic-n wss | 3000 (3000) | 5 s | 0 | 25,200 | 1.96 | 77.9 | 415.2 (161.1) | 141.7 (86.8) | 0.64 / 7.73 | – |
+| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,200 | 0.30 | 15.9 | 14.5 (2.8) | 4.9 (4.0) | 0.30 / 1.11 | 100.0 |
+| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,201 | 0.36 | 18.9 | 45.3 (3.4) | 15.5 (14.3) | 0.37 / 1.22 | 100.0 |
+| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,201 | 0.36 | 18.5 | 17.4 (3.1) | 5.9 (4.9) | 0.33 / 1.17 | 100.0 |
+| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,203 | 0.41 | 21.2 | 34.5 (3.7) | 11.8 (10.5) | 0.35 / 1.26 | 100.0 |
+| heavy aquatic-1 ws | 4000 (4000) | 1 s | 0 | 110,184 | 1.34 | 12.1 | 443.9 (45.5) | 113.6 (102.0) | 155.78 / 7634.94 | – |
+| heavy aquatic-n ws | 4000 (4000) | 1 s | 0 | 167,445 | 5.08 | 30.4 | 463.7 (160.1) | 118.7 (77.7) | 0.82 / 24.64 | – |
+| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 127,999 | 0.59 | 4.6 | 20.5 (2.9) | 5.2 (4.5) | 0.26 / 1.65 | 100.0 |
+| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,009 | 1.02 | 8.0 | 24.5 (3.1) | 6.3 (5.5) | 0.28 / 0.94 | 100.0 |
+| media aquatic-1 ws | 3000 (3000) | 5 s | 0 | 60,048 | 0.84 | 14.0 | 281.2 (45.5) | 96.0 (80.5) | 0.62 / 1.65 | – |
+| media aquatic-n ws | 3000 (3000) | 5 s | 0 | 61,146 | 2.76 | 45.2 | 414.5 (158.1) | 141.5 (87.5) | 0.48 / 7.60 | – |
+| media rust-1 ws | 3000 (3000) | 5 s | 0 | 46,608 | 0.46 | 10.0 | 18.9 (2.8) | 6.5 (5.5) | 0.32 / 0.90 | 100.0 |
+| media rust-n ws | 3000 (3000) | 5 s | 0 | 46,615 | 0.64 | 13.8 | 23.4 (3.1) | 8.0 (6.9) | 0.36 / 18.24 | 100.0 |
 <!-- perf-tables:end -->
 
 ## 12. Open items
@@ -490,11 +536,40 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   these string-heavy frames. Re-measure on x86 (AVX2); remove the backend if it stays slower.
 - Optional: skip the UTF-8 check when the WebSocket layer already validated the text frame
   (costs ~0.5 µs per 14 KB).
-- **Multi-core efficiency (next):** with peers of a swarm on different workers, most offers and
-  answers cross workers; at 128k msgs/s `rust-n` uses ~2.7× the CPU of `rust-1` (§11). Plan:
-  move a connection to the worker that owns its swarm after its first announce (clients
-  usually use one swarm per connection), so traffic stays on one core; batch cross-worker
-  flushes.
+- **Multi-core efficiency (done: `content` placement, §13.3):** with hash routing most offers
+  and answers crossed workers (`rust-n` ~2.7× the CPU of `rust-1` at 128k msgs/s). Clients
+  (p2p-media-loader: one WebSocket per tracker per player, shared by the video and audio streams
+  and every quality; the old quality kept ~30 s after a switch) mostly use the swarms of one
+  piece of content per connection. Swarms now follow the content and connections move once, at
+  their first announce. Load test (M1, 8 workers, machine not idle, §11): requests 100% local in
+  every profile (vs 11–17% with `hash`); CPU per message heavy 5.1 µs (`hash` 10.6, one worker
+  4.0), media 10.1 µs (`hash` 17.1, one worker 7.8), light ws 12.8 µs (`hash` 23.0); RTT p50
+  0.29 vs 0.49 ms (heavy); 0 errors. The remaining gap to one worker is not analysed yet (likely per-worker
+  wake-ups with the load spread over 8 threads). An
+  early variant also spilled new hashes from a worker above 1.25 × the mean request rate: it
+  split contents (~90% local) for no gain while no worker was saturated; spilling now needs a
+  saturated worker (§13.3), and new content is balanced by connection count (request rates lag
+  behind a ramp).
+- **aquatic_ws comparison (done, `loadtest/aquatic.sh`, §11):** in a Linux container (Docker
+  Desktop VM on M1, 8 CPUs shared with the load generator), for the same useful traffic (the same
+  announces, offers and answers delivered): `rust-n` uses 4.3–5.4× less CPU than `aquatic-n`
+  (heavy: 1.0 vs 5.1 cores) and `rust-1` 1.8–2.2× less than `aquatic-1`; `aquatic-1` saturates in
+  the heavy profile (74% of offers delivered, RTT p50 156 ms) while `rust-1` carries it on 0.6
+  cores. Memory per connection above idle 4–7 KiB (ws) / 10–14 KiB (wss) vs 75–102 KiB
+  (async-tungstenite buffers per connection), plus aquatic's fixed 45 / 160 MiB at idle; RTT p50
+  0.26–0.37 vs 0.48–0.82 ms. aquatic also replies to every announce that carries an answer (the
+  JS tracker and this server send nothing), so it sends ~10× more announce replies; its CPU µs /
+  msg includes them. Where aquatic's CPU goes with many workers (every request crosses from a
+  socket to a swarm worker and back) is not analysed.
+- **Placement, open (research):** creation-time balance cannot foresee popularity — a piece of
+  content that outgrows one core stays on it (only its new hashes spill); fixing that needs
+  moving live swarms or connections. Swarm-creation races in a mass reconnect (after a restart)
+  can split a content until its swarms empty. Clients that put unrelated torrents on one socket
+  (webtorrent / bittorrent-tracker) still cross workers. Accepts: on macOS all workers share
+  one listening socket and one worker may accept most connections (they move afterwards, but
+  that worker does every TLS handshake). p2p-media-loader: on a quality switch with nothing
+  cached for the old stream, its loader releases the socket before the new one acquires it,
+  so a video-only client reconnects (new TLS handshake) per switch; acquiring first avoids it.
 - **WebSocket library comparison (M1, done):** fastwebsockets and sockudo-ws both kept
   per-connection buffers sized to the largest frame: 63–92 KiB (fastwebsockets) and 113–193 KiB
   (sockudo-ws: 64 KiB read + 16 KiB write buffer per connection) per connection vs JS 18–36 KiB,
@@ -502,10 +577,6 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   ~1.8% of connections during the ramp. The own framing with shared per-worker buffers (§13.2)
   brought memory to 15–22 KiB per connection and CPU per message to ≤ fastwebsockets, passes
   the same suites and Autobahn, and replaced both.
-- **Moving connections between workers (research):** to match the info_hashes a connection is
-  active in (quality switches change them); connection state is already owned and `Send`.
-  Needs a design for connection ids, in-flight messages and placement (group-id URL parameter
-  vs dynamic placement).
 - A single busy worker accepts new connections more slowly during a 1000/s ramp; on macOS
   (listen backlog 128) a few connects were refused in one manual run. Consider prioritising
   the accept loop or `reusePort` on Linux.
@@ -535,12 +606,13 @@ defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-
 | `tracker.offerSelection` | `sample` | `sample` / `window` / `round_robin` (§5.2) |
 | `websocketsAccess.allowOrigins` / `denyOrigins` / `denyEmptyOrigin` | — | both lists set → config error; denied → TCP close |
 | `workers` (new) | available parallelism | 1–64; one shard each |
+| `placement` (new) | `content` | `content`: info_hash directory, swarms follow the content, connections move at their first announce; `hash`: `foldhash(info_hash) % workers`, no moves (§13.3). Unknown value → config error |
 | `reusePort` (new) | false | Linux only: one `SO_REUSEPORT` socket per worker; otherwise one shared socket |
 | `maxBackpressure` (new) | 1 MiB | per-connection queued bytes; further messages to it are dropped (`droppedMessages`) |
 | `indexHtml` (new) | `./index.html` if present | served at `GET /` |
 
 Unknown fields are ignored. Invalid config (wrong types, both origin lists, half a key pair,
-`workers` out of range, unknown `offerSelection`) → error at startup.
+`workers` out of range, unknown `offerSelection` or `placement`) → error at startup.
 
 ### 13.2 Connections and HTTP
 
@@ -574,21 +646,53 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
     removed (§13.3).
   - The local shard path parses straight from the shared buffer and applies the message without
     any copy; a message for another worker is copied once (`OwnedMessage::copy_from`).
-  - All per-connection state is owned and `Send` (needed to move connections between workers
-    later, §12).
+  - All per-connection state is owned and `Send`: a connection can be **detached** after a
+    message (`Endpoint::message` → `Flow::Detach`) and resumed on another worker
+    (`driver::resume`): the socket is deregistered (`into_std`) and re-registered there, with
+    its rustls session, pending TLS bytes, the unparsed rest of its input and queued control
+    frames (pongs); idle timing continues.
 - Earlier transports (fastwebsockets, sockudo-ws) were removed after the comparison in §12.
 
-### 13.3 Workers and sharding
+### 13.3 Workers, sharding and placement
 
 - N workers: a thread each, with a current-thread tokio runtime, its own `Shard` (seeded per
-  worker), its accepted connections and an inbox channel. Every worker accepts on every
-  listener.
+  worker), its connections and an inbox channel. Every worker accepts on every listener.
 - `ConnId` = worker (8 bits) | generation (24 bits) | slot (32 bits); messages for a closed
   connection or a reused slot are dropped.
+- **Owner of an info_hash** (`placement`, 1 worker → always the local shard):
+  - `hash`: shard `foldhash(info_hash) % N` (seed shared by all workers);
+  - `content` (default): a global directory `info_hash → worker` (`papaya` lock-free map,
+    foldhash). **Invariant:** a swarm for `h` exists on shard `w` ⇒ `directory[h] = w`, so an
+    info_hash is never split over shards. Kept by: *bind before create* — an announce for an
+    unknown `h` claims it (insert-if-absent; a concurrent claimant gets the winner), and a
+    shard that receives a forwarded announce for a swarm it does not have claims `h` itself
+    first or, if another worker owns it, forwards it there (and tells the connection's worker
+    that this shard may hold its peers, `Track`); *release only when empty* — at every expiry
+    tick (`announceInterval`) each worker releases its entries without a swarm in its shard
+    (remove-if-still-own). Both run on the owner's thread.
+- **Placement of new info_hashes** (`content`): loads are per worker, published by the worker
+  itself: open WebSocket connections (exact) and busy time of its runtime (tokio
+  `worker_total_busy_duration`, sampled every 100 ms, moving average with weight 0.3, permille).
+  Two distinct random workers are drawn (power of two choices):
+  - **new content** (the first message of a connection is an announce of an unknown `h`): the
+    one with fewer connections, if it has fewer than 0.8 × the connections of the accepting
+    worker; otherwise the accepting worker;
+  - **new hash of a placed connection** (audio, a new quality): the connection's worker, unless
+    it is ≥ 80% busy and the less busy pick is at least 20 points less busy (spill; splits the
+    content, so only when the worker is saturated).
+- **Moving at the first message** (`content`): a connection's first message decides. An
+  announce whose `h` is owned by (or newly placed on) another worker → nothing is applied, the
+  connection is detached (§13.2) with that message and sent to the owner (`Adopt` event). The
+  owner registers a new `ConnId`, applies the message, then resumes the connection (input that
+  arrived with it is processed after it, in order). The old slot is freed without a disconnect:
+  no shard holds the old id. Any other first message (scrape, stop, answer, a local announce)
+  keeps the connection on its accepting worker. After its first message a connection never
+  moves.
 - A frame is parsed once by the worker that owns the connection, then routed:
-  - announce / stop / answer / scrape of one hash → shard `foldhash(info_hash) % N` (seed shared
-    by all workers); local shard → applied directly; otherwise sent as an `OwnedMessage` (frame
-    `Bytes` + offsets, no copy, no re-parse);
+  - announce / stop / answer / scrape of one hash → the owner's shard (`content`: an unknown
+    `h` on stop / answer / scrape → the local shard; no swarm exists anywhere, same outcome);
+    local shard → applied directly; otherwise sent as an `OwnedMessage` (one copy of the frame
+    + offsets, no re-parse);
   - a stop whose ids cannot match → nothing; an answer without a usable `info_hash` → local shard
     if N = 1, else `BadField("info_hash")`;
   - scrape of all / several hashes → gathered (§13.4).
@@ -597,27 +701,38 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
   (one channel send per destination per scheduler tick).
 - A rejected message on a remote shard closes the connection on its own worker (`Close` event).
 - Each connection remembers which shards it announced to; on close every one of them gets a
-  disconnect, through the same FIFO as its requests.
+  disconnect, through the same FIFO as its requests. (A request forwarded again because its
+  binding changed in flight can race a close; the peer then expires after
+  `2 × announceInterval`.)
 
 ### 13.4 Scrape and stats across shards
 
-Scrape of all swarms or of several hashes is scattered to the shards owning them and gathered;
-entries are encoded in request order with the first occurrence kept (§7.2), all swarms in shard
-order. `/stats.json` gathers `(info_hash, peers)` of every shard.
+Scrape of all swarms or of several hashes is scattered to the shards owning them and gathered
+(`content`: hashes not in the directory are asked nowhere and reported 0 / 0); entries are
+encoded in request order with the first occurrence kept (§7.2), all swarms in shard order.
+`/stats.json` gathers `(info_hash, peers)` and the request counters of every shard.
 
 ### 13.5 `/stats.json`
 
 `{"torrentsCount", "peersCount", "servers":[{"server":"host:port","webSocketsCount"}],
-"memory":{"rss"}, "workers", "droppedMessages", "peersCountPerInfoHashPerTracker":[{"totalPeers",
-"<hex info_hash>": peers, …} per shard]}`. The hex is computed like JS `Buffer.from(infoHash,
+"memory":{"rss"}, "workers", "droppedMessages", "placement":{"mode", "movedConnections",
+"localRequests", "remoteRequests", "workers":[{"connections", "busy"} per worker],
+"directorySize"}, "peersCountPerInfoHashPerTracker":[{"totalPeers", "<hex info_hash>": peers, …}
+per shard]}`. `localRequests` / `remoteRequests`: requests of each worker's connections applied
+to its own shard / sent to another one (scrape gathers not counted); `busy`: 0–1, `content` only. The hex is computed like JS `Buffer.from(infoHash,
 "binary").toString("hex")` (one byte per character).
 
 ## 14. Load test (`crates/wt-loadgen`, `loadtest/run.sh`)
 
 - `wt-loadgen load`: N clients (tokio multi-thread, tokio-tungstenite, rustls with `--ca`), one
-  connection and one peer each, in one of `--swarms` swarms. Each announces `started` with
-  `--offers` offers (SDP from `bench/fixtures/offer.sdp`), re-announces every `--interval` s
-  (spread over the interval), and answers every offer it receives. Connects are paced evenly at
+  connection and one peer_id each, watching one of `--swarms` contents. Each content has
+  `--streams` streams (default 1; e.g. 2 = video + audio) and stream 0 has `--qualities`
+  qualities (default 1); every (content, stream, quality) is its own swarm. A client announces
+  `started` in its streams with `--offers` offers (SDP from `bench/fixtures/offer.sdp`),
+  re-announces them every `--interval` s (spread over the interval), and answers every offer it
+  receives (in the offer's swarm). With `--switch S` > 0 and several qualities it switches stream
+  0 to the next quality every S s (spread): `started` in the new swarm, `stopped` in the old one
+  `--overlap` s later (default 5; skipped if it switched back meanwhile). Connects are paced evenly at
   `--ramp` per second (bursts overflow small listen backlogs, e.g. macOS `somaxconn` = 128).
   After the ramp, a `--duration` s steady phase measures messages/s, announce → reply RTT
   (HdrHistogram), and the server's CPU seconds and RSS (`/proc` or `ps`, `--server-pid`).
@@ -628,7 +743,21 @@ order. `/stats.json` gathers `(info_hash, peers)` of every shard.
   sorted.
 - `wt-loadgen gen-cert DIR`: self-signed `cert.pem` / `key.pem` for `localhost` (rcgen).
 - `loadtest/run.sh`: for the profiles light (`LIGHT_CONNS`=3000, re-announce every 5 s, ws and
-  wss) and heavy (`HEAVY_CONNS`=4000, every 1 s, ws), runs the JS tracker (`run-tracker.ts`), the
-  JS multi-worker tracker (`run-worker-tracker.ts`), Rust with 1 worker and with all cores, each in a fresh process with the same config (`compression: 0`,
-  `announceInterval: 120`); then the smoke script against JS and Rust, compared exactly. Writes
-  `bench/results/load.json` and regenerates the load table of §11.
+  wss), heavy (`HEAVY_CONNS`=4000, every 1 s, ws) and media (`MEDIA_CONNS`=3000, video + audio,
+  4 qualities, switch every 10 s, overlap 5 s, every 5 s, ws), runs the JS tracker
+  (`run-tracker.ts`), the JS multi-worker tracker (`run-worker-tracker.ts`), Rust with 1 worker,
+  with all cores (`content` placement) and with all cores and `placement: "hash"`
+  (`rust-n-hash`), each in a fresh process with the same config (`compression: 0`,
+  `announceInterval: 120`). After each run it keeps the server's `/stats.json` `placement`
+  (Rust): the Local % column. Then the smoke script against JS and Rust, compared exactly.
+  Writes `bench/results/load.json` and regenerates the load table of §11.
+- `loadtest/aquatic.sh`: the same profiles against [aquatic_ws](https://github.com/greatest-ape/aquatic)
+  (Linux only: glommio / io_uring), pinned by `AQUATIC_REV`. `loadtest/aquatic/Dockerfile` builds
+  aquatic_ws (default features: mimalloc, prometheus) and this workspace's `wt-tracker` and
+  `wt-loadgen` from source (Debian trixie); `loadtest/aquatic/run.sh` runs inside one container
+  (`seccomp=unconfined`, unlimited memlock for io_uring, nofile 65536), server and load generator
+  sharing its CPUs: targets `aquatic-1` (1 socket + 1 swarm worker), `aquatic-n` (N threads:
+  N − ⌊N/4⌋ socket, ⌊N/4⌋ swarm workers), `rust-1`, `rust-n` (N workers, `reusePort`). aquatic config:
+  its defaults (`aquatic_ws -p`) with address, workers, TLS and `peer_announce_interval = 120`
+  changed. Server CPU and RSS from `/proc` (RSS from `VmRSS`). Writes `bench/results/aquatic.json`
+  and a second load table in §11. No wire smoke check (aquatic's replies differ from JS).

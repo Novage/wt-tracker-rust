@@ -69,31 +69,52 @@ for (const t of threadCounts) {
   );
 }
 
-// Load test (loadtest/run.sh), if it has been run.
-const loadFile = path.join(dir, "load.json");
-if (fs.existsSync(loadFile)) {
-  type Run = {
-    label: string; conns: number; connected: number; failed: number; closed_early: number;
-    per_second: { sent: number; received: number };
-    rtt_ms: { p50: number; p99: number };
-    server: { cpu_cores: number; cpu_us_per_message: number; rss_bytes: number; rss_bytes_per_conn: number } | null;
+// Load tests (loadtest/run.sh, loadtest/aquatic.sh), if they have been run.
+type Run = {
+  label: string; conns: number; connected: number; failed: number; closed_early: number; interval_s: number;
+  swarms: number; offers: number; duration_s: number;
+  per_second: { sent: number; received: number };
+  rtt_ms: { p50: number; p99: number };
+  server: {
+    cpu_cores: number; cpu_us_per_message: number; rss_bytes: number; rss_bytes_per_conn: number;
+    rss_idle_bytes?: number | null; rss_bytes_per_conn_above_idle?: number | null;
+  } | null;
+  placement?: { localRequests: number; remoteRequests: number };
+};
+const loadTable = (runs: Run[]) => {
+  lines.push("| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % |");
+  lines.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+  const idle = (v: number | null | undefined, f: (n: number) => string) => (v == null ? "" : ` (${f(v)})`);
+  const order = (l: string) => ["light", "heavy", "media"].findIndex((p) => l.startsWith(p));
+  const local = (r: Run) => {
+    const p = r.placement;
+    const all = p ? p.localRequests + p.remoteRequests : 0;
+    return all ? f1((100 * p!.localRequests) / all) : "–";
   };
-  const load = JSON.parse(fs.readFileSync(loadFile, "utf8")) as { env: Record<string, unknown>; smoke_same: boolean; runs: Run[] };
-  const r0 = load.runs[0] as unknown as { swarms: number; offers: number; duration_s: number };
-  lines.push("", "### Load test (end to end, `loadtest/run.sh`)", "");
-  lines.push(`- ${JSON.stringify(load.env)}; client and server on the same machine.`);
-  lines.push(`- ${r0?.swarms} swarms, ${r0?.offers} offers per announce (1.3 KB SDP), every offer answered, ${Math.round(r0?.duration_s ?? 0)} s steady phase. JS with \`compression: 0\` (Rust does not negotiate permessage-deflate). \`js-workers\` = JS multi-worker tracker, \`rust-1\` / \`rust-n\` = 1 / all-core workers.`);
-  lines.push(`- Wire smoke check (same messages from JS and Rust): **${load.smoke_same ? "yes" : "no"}**.`, "");
-  lines.push("| Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB | RSS KiB / conn | RTT p50 / p99 ms |");
-  lines.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
-  const order = (l: string) => (l.startsWith("light") ? 0 : 1);
-  for (const r of [...load.runs].sort((a, b) => order(a.label) - order(b.label) || (a.label < b.label ? -1 : 1))) {
+  for (const r of [...runs].sort((a, b) => order(a.label) - order(b.label) || (a.label < b.label ? -1 : 1))) {
     const s = r.server;
-    const interval = (r as unknown as { interval_s: number }).interval_s;
     lines.push(
-      `| ${r.label} | ${r.conns} (${r.connected}) | ${interval} s | ${r.failed + r.closed_early} | ${Math.round(r.per_second.sent + r.per_second.received).toLocaleString("en-US")} | ${s ? f2(s.cpu_cores) : "?"} | ${s ? f1(s.cpu_us_per_message) : "?"} | ${s ? f1(s.rss_bytes / 2 ** 20) : "?"} | ${s ? f1(s.rss_bytes_per_conn / 1024) : "?"} | ${f2(r.rtt_ms.p50)} / ${f2(r.rtt_ms.p99)} |`,
+      `| ${r.label} | ${r.conns} (${r.connected}) | ${r.interval_s} s | ${r.failed + r.closed_early} | ${Math.round(r.per_second.sent + r.per_second.received).toLocaleString("en-US")} | ${s ? f2(s.cpu_cores) : "?"} | ${s ? f1(s.cpu_us_per_message) : "?"} | ${s ? f1(s.rss_bytes / 2 ** 20) + idle(s.rss_idle_bytes, (b) => f1(b / 2 ** 20)) : "?"} | ${s ? f1(s.rss_bytes_per_conn / 1024) + idle(s.rss_bytes_per_conn_above_idle, (b) => f1(b / 1024)) : "?"} | ${f2(r.rtt_ms.p50)} / ${f2(r.rtt_ms.p99)} | ${local(r)} |`,
     );
   }
+};
+const loadFile = path.join(dir, "load.json");
+if (fs.existsSync(loadFile)) {
+  const load = JSON.parse(fs.readFileSync(loadFile, "utf8")) as { env: Record<string, unknown>; smoke_same: boolean; runs: Run[] };
+  const r0 = load.runs[0];
+  lines.push("", "### Load test (end to end, `loadtest/run.sh`)", "");
+  lines.push(`- ${JSON.stringify(load.env)}; client and server on the same machine.`);
+  lines.push(`- ${r0?.swarms} swarms, ${r0?.offers} offers per announce (1.3 KB SDP), every offer answered, ${Math.round(r0?.duration_s ?? 0)} s steady phase. JS with \`compression: 0\` (Rust does not negotiate permessage-deflate). \`js-workers\` = JS multi-worker tracker, \`rust-1\` / \`rust-n\` = 1 / all-core workers, \`rust-n-hash\` = all-core workers with \`placement: "hash"\`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Local % = requests applied on the connection's own worker (Rust).`);
+  lines.push(`- Wire smoke check (same messages from JS and Rust): **${load.smoke_same ? "yes" : "no"}**.`, "");
+  loadTable(load.runs);
+}
+const aquaticFile = path.join(dir, "aquatic.json");
+if (fs.existsSync(aquaticFile)) {
+  const aq = JSON.parse(fs.readFileSync(aquaticFile, "utf8")) as { env: Record<string, unknown>; runs: Run[] };
+  lines.push("", "### Load test vs aquatic_ws (Linux container, `loadtest/aquatic.sh`)", "");
+  lines.push(`- ${JSON.stringify(aq.env)}; server and load generator in one container, sharing its CPUs. Same profiles and load generator as above.`);
+  lines.push("- `aquatic-1` = 1 socket + 1 swarm worker (2 threads), `aquatic-n` = all cores split ¾ socket / ¼ swarm workers (io_uring, glommio, async-tungstenite, mimalloc); `rust-1` / `rust-n` = 1 / all-core workers (`rust-n` with `reusePort`, `content` placement).", "");
+  loadTable(aq.runs);
 }
 
 const tables = lines.join("\n");

@@ -6,6 +6,7 @@ pub mod config;
 mod conn;
 pub mod echo;
 mod http;
+pub mod placement;
 mod stats;
 mod tls;
 mod worker;
@@ -28,7 +29,7 @@ use worker::{Event, WorkerListener};
 /// State shared by all workers (read-only after start, plus atomics).
 pub(crate) struct Shared {
     pub senders: Vec<mpsc::UnboundedSender<Vec<Event>>>,
-    /// Routes an info_hash to its shard; the same seed in every worker.
+    /// `hash` placement: routes an info_hash to its shard; the same seed in every worker.
     pub router: foldhash::fast::RandomState,
     pub seed: u64,
     pub workers: usize,
@@ -37,6 +38,10 @@ pub(crate) struct Shared {
     pub access: AccessConfig,
     pub index_html: Option<Bytes>,
     pub listeners: Vec<ListenerInfo>,
+    pub placement: placement::Mode,
+    /// info_hash → owning worker (`content` placement).
+    pub directory: placement::Directory,
+    pub loads: placement::Loads,
 }
 
 pub(crate) struct ListenerInfo {
@@ -158,6 +163,9 @@ pub fn start(config: Config) -> Result<Server, String> {
         access: config.websockets_access.clone(),
         index_html,
         listeners,
+        placement: config.placement_mode()?,
+        directory: placement::Directory::new(),
+        loads: placement::Loads::new(workers),
     });
 
     let (shutdown, shutdown_rx) = watch::channel(false);

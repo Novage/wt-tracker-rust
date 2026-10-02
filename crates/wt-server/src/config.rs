@@ -28,6 +28,10 @@ pub struct Config {
     /// `index.html` served at `/`. Default: `./index.html` if it exists.
     #[serde(default)]
     pub index_html: Option<PathBuf>,
+    /// Which shard owns an info_hash: `content` (default; swarms follow the content and
+    /// connections move to them, spec §13.3) or `hash` (`foldhash(info_hash) % workers`).
+    #[serde(default)]
+    pub placement: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -173,7 +177,16 @@ impl Config {
             return Err("'workers' must be between 1 and 64".into());
         }
         self.tracker_settings()?;
+        self.placement_mode()?;
         Ok(())
+    }
+
+    pub fn placement_mode(&self) -> Result<crate::placement::Mode, String> {
+        match self.placement.as_deref() {
+            None | Some("content") => Ok(crate::placement::Mode::Content),
+            Some("hash") => Ok(crate::placement::Mode::Hash),
+            Some(other) => Err(format!("unknown placement '{other}'")),
+        }
     }
 
     pub fn worker_count(&self) -> usize {

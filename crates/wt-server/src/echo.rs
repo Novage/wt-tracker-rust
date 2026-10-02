@@ -18,7 +18,7 @@ use tokio::task::{LocalSet, spawn_local};
 
 use crate::http;
 use crate::worker::{Out, Pop};
-use crate::ws::driver::{self, Endpoint, Io, Limits};
+use crate::ws::driver::{self, Endpoint, Flow, Io, Limits};
 
 #[derive(Default)]
 struct Echo {
@@ -28,7 +28,7 @@ struct Echo {
 }
 
 impl Endpoint for Echo {
-    fn message(&self, text: bool, data: &[u8]) -> Result<(), u16> {
+    fn message(&self, text: bool, data: &[u8]) -> Result<Flow, u16> {
         let data = Bytes::copy_from_slice(data);
         self.queue.borrow_mut().push_back(if text {
             Out::Text(data)
@@ -36,7 +36,7 @@ impl Endpoint for Echo {
             Out::Binary(data)
         });
         self.wake.notify_one();
-        Ok(())
+        Ok(Flow::Continue)
     }
     fn pop(&self) -> Pop {
         match self.queue.borrow_mut().pop_front() {
@@ -83,7 +83,8 @@ async fn serve(tcp: TcpStream, tls: Option<Arc<ServerConfig>>) {
         max_payload: 64 << 20,
         idle: Duration::ZERO,
     };
-    driver::run(io, rest, limits, &Echo::default()).await;
+    // Echo never detaches.
+    let _ = driver::run(io, rest, limits, &Echo::default()).await;
 }
 
 /// Serves until the process ends. `tls`: PEM certificate chain and key files.
