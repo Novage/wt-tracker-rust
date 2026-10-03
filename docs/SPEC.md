@@ -679,9 +679,7 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   can split a content until its swarms empty. Clients that put unrelated torrents on one socket
   (webtorrent / bittorrent-tracker) still cross workers. Accepts: on macOS all workers share
   one listening socket and one worker may accept most connections (they move afterwards, but
-  that worker does every TLS handshake). p2p-media-loader: on a quality switch with nothing
-  cached for the old stream, its loader releases the socket before the new one acquires it,
-  so a video-only client reconnects (new TLS handshake) per switch; acquiring first avoids it.
+  that worker does every TLS handshake).
 - **WebSocket library comparison (M1, done):** fastwebsockets and sockudo-ws both kept
   per-connection buffers sized to the largest frame: 63–92 KiB (fastwebsockets) and 113–193 KiB
   (sockudo-ws: 64 KiB read + 16 KiB write buffer per connection) per connection vs JS 18–36 KiB,
