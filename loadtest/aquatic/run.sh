@@ -6,6 +6,7 @@ OUT=/out
 # A new port per run: aquatic leaves server-side TIME_WAIT sockets on its port, and its listener
 # does not set SO_REUSEADDR, so a plain bind to that port fails for a while (EADDRINUSE).
 PORT=18100
+METRICS_PORT=18190
 N=$(nproc)
 LIGHT_CONNS=${LIGHT_CONNS:-3000}
 HEAVY_CONNS=${HEAVY_CONNS:-4000}
@@ -44,7 +45,15 @@ rust_config() { # workers tls
   local tls="" reuse=""
   [ "$2" = true ] && tls=",\"key_file_name\":\"$OUT/key.pem\",\"cert_file_name\":\"$OUT/cert.pem\""
   [ "$1" -gt 1 ] && reuse=",\"reusePort\":true"
-  echo "{\"servers\":[{\"server\":{\"host\":\"127.0.0.1\",\"port\":$PORT$tls}}],\"workers\":$1$reuse,\"tracker\":{\"announceInterval\":120}}"
+  echo "{\"servers\":[{\"server\":{\"host\":\"127.0.0.1\",\"port\":$PORT$tls}}],\"workers\":$1$reuse,\"tracker\":{\"announceInterval\":120},\"metrics\":{\"host\":\"127.0.0.1\",\"port\":$METRICS_PORT}}"
+}
+
+# The placement counters from wt-tracker's /metrics, as {"placement":{...}} (Local % column).
+placement_json() {
+  curl -s "http://127.0.0.1:$1/metrics" | awk '
+    /^wt_routed_requests_total/ { if ($0 ~ /target="local"/) l += $NF; else r += $NF }
+    /^wt_moved_connections_total/ { m += $NF }
+    END { printf "{\"placement\":{\"localRequests\":%d,\"remoteRequests\":%d,\"movedConnections\":%d}}\n", l, r, m }'
 }
 
 wait_port() {
@@ -82,7 +91,7 @@ for profile in "${PROFILES[@]}"; do
         --interval "$interval" --duration "$DURATION" --ramp "$RAMP" --server-pid "$pid" $extra \
         --label "$pname $name $proto" > "$run" || echo "   load generator failed" >&2
       if [[ $name == rust* ]] && [ "$proto" = ws ]; then
-        curl -s "http://127.0.0.1:$PORT/stats.json" > "$OUT/stats-$pname-$name.json" || true
+        placement_json "$METRICS_PORT" > "$OUT/stats-$pname-$name.json" 2>/dev/null || true
       fi
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true

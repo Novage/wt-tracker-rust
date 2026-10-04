@@ -9,7 +9,10 @@ pub mod echo;
 #[doc(hidden)]
 pub mod fuzz;
 mod http;
+pub mod logging;
+mod metrics;
 pub mod placement;
+mod reasons;
 mod stats;
 mod tls;
 mod worker;
@@ -20,7 +23,7 @@ use std::net::{SocketAddr, TcpListener as StdListener, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -46,6 +49,9 @@ pub(crate) struct Shared {
     /// info_hash → owning worker (`content` placement).
     pub directory: placement::Directory,
     pub loads: placement::Loads,
+    /// When the server started (uptime), and as seconds since the Unix epoch (`/metrics`).
+    pub started: Instant,
+    pub started_unix: u64,
 }
 
 pub(crate) struct ListenerInfo {
@@ -72,6 +78,7 @@ pub(crate) enum Phase {
 /// [`Server::shutdown_gracefully`] closes the connections first.
 pub struct Server {
     addrs: Vec<SocketAddr>,
+    metrics_addr: Option<SocketAddr>,
     workers: usize,
     shutdown: watch::Sender<Phase>,
     threads: Vec<JoinHandle<()>>,
@@ -81,6 +88,11 @@ impl Server {
     /// Bound address of every listener, in config order (useful with port 0).
     pub fn local_addrs(&self) -> &[SocketAddr] {
         &self.addrs
+    }
+
+    /// Bound address of the `/metrics` listener, if configured.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.metrics_addr
     }
 
     pub fn workers(&self) -> usize {
@@ -164,6 +176,24 @@ pub fn start(config: Config) -> Result<Server, String> {
         });
     }
 
+    // Worker 0 accepts the metrics scrapers.
+    let mut metrics = match &config.metrics {
+        Some(m) => {
+            let name = format!("{}:{}", m.host, m.port);
+            let addr = (m.host.as_str(), m.port)
+                .to_socket_addrs()
+                .map_err(|e| format!("metrics {name}: {e}"))?
+                .next()
+                .ok_or_else(|| format!("metrics {name}: no address"))?;
+            Some(bind(addr, false).map_err(|e| format!("failed to listen to {name}: {e}"))?)
+        }
+        None => None,
+    };
+    let metrics_addr = match &metrics {
+        Some(socket) => Some(socket.local_addr().map_err(|e| e.to_string())?),
+        None => None,
+    };
+
     let index_path = config
         .index_html
         .clone()
@@ -191,6 +221,10 @@ pub fn start(config: Config) -> Result<Server, String> {
         placement: config.placement_mode()?,
         directory: placement::Directory::new(),
         loads: placement::Loads::new(workers),
+        started: Instant::now(),
+        started_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
     });
 
     let (shutdown, shutdown_rx) = watch::channel(Phase::Running);
@@ -211,16 +245,18 @@ pub fn start(config: Config) -> Result<Server, String> {
         }
         let shared = shared.clone();
         let shutdown_rx = shutdown_rx.clone();
+        let metrics = metrics.take();
         threads.push(
             std::thread::Builder::new()
                 .name(format!("wt-worker-{id}"))
-                .spawn(move || worker::run(id, shared, inbox, own, shutdown_rx))
+                .spawn(move || worker::run(id, shared, inbox, own, metrics, shutdown_rx))
                 .map_err(|e| e.to_string())?,
         );
     }
 
     Ok(Server {
         addrs,
+        metrics_addr,
         workers,
         shutdown,
         threads,

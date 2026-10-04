@@ -23,6 +23,7 @@ use tokio::time::{Instant, sleep_until, timeout};
 
 use super::codec::{self, Data, Fragments, OpCode, Parsed, close};
 use super::deflate::{self, Negotiated};
+use crate::reasons::CloseReason;
 use crate::worker::{Out, Pop};
 
 /// Bytes read per readiness round before frames are processed.
@@ -498,6 +499,8 @@ struct Conn<'e, E: Endpoint> {
     last_rx: Instant,
     /// The endpoint asked to detach; the rest of the input is in `pending`.
     detached: bool,
+    /// The client sent a close frame (it is answered with its code).
+    client_closed: bool,
     /// permessage-deflate, if negotiated.
     deflate: Option<Negotiated>,
 }
@@ -680,7 +683,11 @@ impl<'e, E: Endpoint> Conn<'e, E> {
             }
             OpCode::Pong => Ok(Flow::Continue),
             // Answer with the peer's code (or 1000), then close.
-            OpCode::Close => Err(codec::close_code(payload)?.unwrap_or(close::NORMAL)),
+            OpCode::Close => {
+                let code = codec::close_code(payload)?.unwrap_or(close::NORMAL);
+                self.client_closed = true;
+                Err(code)
+            }
             _ => {
                 let result = match self
                     .fragments
@@ -814,20 +821,22 @@ impl SendIo {
 }
 
 enum End {
-    Close(Option<u16>),
+    /// Close (with a close frame of this code, if any) for this reason.
+    Close(Option<u16>, CloseReason),
     Detach,
 }
 
-/// Runs a WebSocket connection until it closes, or until the endpoint detaches it: then it is
-/// returned parked, untouched since the message that detached it. `pending`: bytes received
-/// after the HTTP head; `deflate`: permessage-deflate as negotiated in the upgrade.
+/// Runs a WebSocket connection until it closes (`Err`: why), or until the endpoint detaches
+/// it: then it is returned parked, untouched since the message that detached it. `pending`:
+/// bytes received after the HTTP head; `deflate`: permessage-deflate as negotiated in the
+/// upgrade.
 pub(crate) async fn run<E: Endpoint>(
     io: Io,
     pending: Vec<u8>,
     limits: Limits,
     deflate: Option<Negotiated>,
     ep: &E,
-) -> Option<Parked> {
+) -> Result<Parked, CloseReason> {
     let conn = Conn {
         io,
         ep,
@@ -839,6 +848,7 @@ pub(crate) async fn run<E: Endpoint>(
         closing: None,
         last_rx: Instant::now(),
         detached: false,
+        client_closed: false,
         deflate,
     };
     drive(conn, pending).await
@@ -851,9 +861,9 @@ pub(crate) async fn resume<E: Endpoint>(
     first: Bytes,
     limits: Limits,
     ep: &E,
-) -> Option<Parked> {
+) -> Result<Parked, CloseReason> {
     let Ok(io) = parked.io.into_io() else {
-        return None;
+        return Err(CloseReason::SocketError);
     };
     let mut conn = Conn {
         io,
@@ -866,6 +876,7 @@ pub(crate) async fn resume<E: Endpoint>(
         closing: None,
         last_rx: parked.last_rx,
         detached: false,
+        client_closed: false,
         deflate: parked.deflate,
     };
     let handled = ep.message(true, &first);
@@ -875,7 +886,7 @@ pub(crate) async fn resume<E: Endpoint>(
         Ok(Flow::Detach) => conn.detached = true,
         Err(code) => {
             conn.finish(Some(code)).await;
-            return None;
+            return Err(CloseReason::from_code(code));
         }
     }
     if conn.detached {
@@ -886,9 +897,9 @@ pub(crate) async fn resume<E: Endpoint>(
 }
 
 impl<E: Endpoint> Conn<'_, E> {
-    fn park(self) -> Option<Parked> {
-        Some(Parked {
-            io: self.io.into_send().ok()?,
+    fn park(self) -> Result<Parked, CloseReason> {
+        Ok(Parked {
+            io: self.io.into_send().map_err(|_| CloseReason::SocketError)?,
             pending: self.pending,
             out: self.out,
             out_offset: self.out_offset,
@@ -896,16 +907,29 @@ impl<E: Endpoint> Conn<'_, E> {
             deflate: self.deflate,
         })
     }
+
+    /// Why input handling ended the connection: `None` is a read error.
+    fn input_reason(&self, code: Option<u16>) -> CloseReason {
+        match code {
+            None => CloseReason::SocketError,
+            Some(_) if self.client_closed => CloseReason::ClientClose,
+            Some(code) => CloseReason::from_code(code),
+        }
+    }
 }
 
-async fn drive<E: Endpoint>(mut conn: Conn<'_, E>, pending: Vec<u8>) -> Option<Parked> {
+async fn drive<E: Endpoint>(
+    mut conn: Conn<'_, E>,
+    pending: Vec<u8>,
+) -> Result<Parked, CloseReason> {
     let ep = conn.ep;
     let idle = conn.limits.idle;
     if !pending.is_empty() {
         let mut rx = pending;
         if let Err(code) = conn.process(&mut rx) {
+            let reason = conn.input_reason(Some(code));
             conn.finish(Some(code)).await;
-            return None;
+            return Err(reason);
         }
         if conn.detached {
             return conn.park();
@@ -919,11 +943,11 @@ async fn drive<E: Endpoint>(mut conn: Conn<'_, E>, pending: Vec<u8>) -> Option<P
         if want_write || conn.io.has_pending_out() {
             match conn.try_flush() {
                 Ok(done) => want_write = !done,
-                Err(_) => break End::Close(None),
+                Err(_) => break End::Close(None, CloseReason::SocketError),
             }
         }
         if !want_write && let Some(code) = conn.closing {
-            break End::Close(Some(code));
+            break End::Close(Some(code), CloseReason::from_code(code));
         }
         let interest = if want_write {
             Interest::READABLE | Interest::WRITABLE
@@ -942,13 +966,13 @@ async fn drive<E: Endpoint>(mut conn: Conn<'_, E>, pending: Vec<u8>) -> Option<P
             }
             _ = ep.wake().notified(), if !want_write => want_write = true,
             ready = conn.io.tcp().ready(interest) => {
-                let Ok(ready) = ready else { break End::Close(None) };
+                let Ok(ready) = ready else { break End::Close(None, CloseReason::SocketError) };
                 if ready.is_readable() {
                     match conn.on_readable() {
                         Ok(true) if conn.detached => break End::Detach,
                         Ok(true) => {}
-                        Ok(false) => break End::Close(None),
-                        Err(code) => break End::Close(code),
+                        Ok(false) => break End::Close(None, CloseReason::Eof),
+                        Err(code) => break End::Close(code, conn.input_reason(code)),
                     }
                     // Replies were probably queued while handling the input: send them now.
                     want_write = true;
@@ -963,15 +987,15 @@ async fn drive<E: Endpoint>(mut conn: Conn<'_, E>, pending: Vec<u8>) -> Option<P
                 want_write = true;
             }
             _ = sleep_until(conn.last_rx + idle), if !idle.is_zero() => {
-                break End::Close(Some(close::NORMAL));
+                break End::Close(Some(close::NORMAL), CloseReason::IdleTimeout);
             }
         }
     };
     match end {
         End::Detach => conn.park(),
-        End::Close(code) => {
+        End::Close(code, reason) => {
             conn.finish(code).await;
-            None
+            Err(reason)
         }
     }
 }

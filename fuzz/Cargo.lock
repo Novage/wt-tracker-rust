@@ -619,6 +619,7 @@ dependencies = [
  "flate2",
  "foldhash",
  "httparse",
+ "log",
  "papaya",
  "rustls",
  "serde",

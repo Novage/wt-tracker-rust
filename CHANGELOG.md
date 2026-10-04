@@ -38,8 +38,8 @@ All notable changes to this project are listed here. The format follows
   protocol applied to a shard; run in CI on every pull request and nightly, and on stable over
   the seed corpus by `cargo test`.
 
-- `/stats.json` `traffic`: messages and bytes sent and received per kind, socket bytes, and
-  bytes before / after compression and inflating.
+- Traffic counters (now in `/metrics`): messages and bytes sent and received per kind, socket
+  bytes, and bytes before / after compression and inflating.
 - First production run at tracker.novage.com.ua (Oracle Ampere A1, 2 cores, real peers): 4× less
   CPU and 3× less memory than aquatic_ws on the same host and load.
 
@@ -47,7 +47,20 @@ All notable changes to this project are listed here. The format follows
   certificate exchange (~3.5 KB less egress per reconnect; ~25% of production egress was
   handshakes).
 
+- Observability: Prometheus `/metrics` on an optional private listener (`metrics` setting):
+  traffic, compression, placement counters, connections closed by reason and messages rejected
+  by reason, per worker; a worker that does not answer within 1 s shows as `wt_worker_up 0`.
+  Structured logs: one logfmt line per event on stderr (`logLevel`; rate-limited rejected
+  messages and accept errors; every close with its reason at `debug`).
+- `/stats.json?infoHash=<hex>`: peers of one swarm and the workers holding it.
+- `/swarms?top=N` on the private listener: the largest swarms (hex info_hash, peers, worker).
+
 ### Changed
+
+- **Breaking:** `/stats.json` is a small summary (`torrentsCount`, `peersCount`, `servers`,
+  `memory`, `workers`, `uptimeSeconds`); `peersCountPerInfoHashPerTracker`, `placement`,
+  `traffic` and `droppedMessages` moved to `/metrics`, the per-info-hash list to `/swarms`. A request no longer copies every swarm.
+- Startup and shutdown lines are logfmt events on stderr instead of plain text on stdout.
 
 - `compressOutgoingMinSize` now defaults to 1024: outgoing messages of at least 1 KiB (offers)
   are compressed when the client negotiated permessage-deflate (~25% less egress in production at
@@ -55,3 +68,8 @@ All notable changes to this project are listed here. The format follows
 
 - WebSocket libraries fastwebsockets and sockudo-ws, used by the first server prototype, were
   replaced by the own implementation (5–9 instead of 63–193 KiB per connection).
+
+### Fixed
+
+- A message rejected by another worker's shard closed its connection with 1000 instead of 1008
+  (Policy Violation), unlike a rejection by the local shard.

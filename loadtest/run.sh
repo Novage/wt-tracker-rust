@@ -11,7 +11,7 @@
 # against servers with compression 1 (rust-*: compressing outgoing messages of at least 1 KiB, the
 # default; rust-n-in: compressOutgoingMinSize 0, inflating only, like JS; rust-n-off: compression 0,
 # the uncompressed baseline). SWARMS=100 DURATION=15 RAMP=1000.
-# After each run the server's /stats.json "placement" is kept (Local % column).
+# After each run the Rust server's placement counters (from /metrics) are kept (Local % column).
 # On macOS keep conns below ~12000 (ephemeral ports per destination). The client shares the
 # machine with the server.
 set -euo pipefail
@@ -34,6 +34,7 @@ PROFILES=(
 )
 WS_PORT=18100
 WSS_PORT=18443
+METRICS_PORT=18190
 OUT=target/loadtest
 
 ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
@@ -51,8 +52,15 @@ config() {
 {"servers":[
   {"server":{"host":"127.0.0.1","port":$WS_PORT},"websockets":{$ws}},
   {"server":{"host":"127.0.0.1","port":$WSS_PORT,"key_file_name":"$OUT/key.pem","cert_file_name":"$OUT/cert.pem"},"websockets":{$ws}}
- ],"tracker":{"announceInterval":120}$workers}
+ ],"tracker":{"announceInterval":120}$workers,"metrics":{"host":"127.0.0.1","port":$METRICS_PORT}}
 EOF
+}
+# The placement counters from wt-tracker's /metrics, as {"placement":{...}} (Local % column).
+placement_json() {
+  curl -s "http://127.0.0.1:$1/metrics" | awk '
+    /^wt_routed_requests_total/ { if ($0 ~ /target="local"/) l += $NF; else r += $NF }
+    /^wt_moved_connections_total/ { m += $NF }
+    END { printf "{\"placement\":{\"localRequests\":%d,\"remoteRequests\":%d,\"movedConnections\":%d}}\n", l, r, m }'
 }
 config 1 > "$OUT/config-1.json"
 config "" > "$OUT/config-n.json"
@@ -120,7 +128,7 @@ for profile in "${PROFILES[@]}"; do
         --interval "$interval" --duration "$DURATION" --ramp "$RAMP" --server-pid "$SERVER_PID" $extra \
         --label "$pname $name $proto" > "$run" || echo "   load generator failed" >&2
       # Rust only: where requests were applied (local vs another worker's shard).
-      curl -s "http://127.0.0.1:$WS_PORT/stats.json" > "$OUT/stats.json" || true
+      placement_json "$METRICS_PORT" > "$OUT/stats.json" 2>/dev/null || true
       node -e '
 const fs = require("fs"), [run, stats] = process.argv.slice(1);
 try {

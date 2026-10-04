@@ -38,7 +38,7 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 |---|---|
 | `crates/wt-core` | `Shard`, `Key`, `Request`, `Outbox`, `Settings` |
 | `crates/wt-proto` | wire protocol: `handle`, parser backends, `Encoder` (§7) |
-| `crates/wt-server` | the server, binary `wt-tracker` (§13); `src/ws/` own WebSocket framing (`codec`), permessage-deflate (`deflate`) and connection driver (`driver`); `placement` info_hash directory, worker loads and placement choices (§13.3); `echo` + `examples/ws-echo.rs` echo server for conformance testing |
+| `crates/wt-server` | the server, binary `wt-tracker` (§13); `src/ws/` own WebSocket framing (`codec`), permessage-deflate (`deflate`) and connection driver (`driver`); `placement` info_hash directory, worker loads and placement choices (§13.3); `stats` / `metrics` / `reasons` / `logging` (§13.5, §13.7, §13.8); `echo` + `examples/ws-echo.rs` echo server for conformance testing |
 | `crates/wt-loadgen`, `loadtest/run.sh` | load generator (tokio-tungstenite, or its own client `src/client.rs` for permessage-deflate and wire bytes), wire smoke check, JS vs Rust load test (§14) |
 | `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss, incl. compression (§9) |
 | `loadtest/aquatic.sh`, `loadtest/aquatic/` | load test against aquatic_ws in a Linux container (§14) |
@@ -307,7 +307,9 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | Inflated message > `maxPayloadLength` / corrupt | connection closed | close 1009 / 1007 | |
 | Answer without a string `info_hash`, several workers | single tracker: delivered; multi-worker: error | 1 worker: delivered; > 1: `BadField("info_hash")` → close | cannot be routed to a shard |
 | Answer target only in a swarm of another shard | delivered (one global peer table) | `UnknownPeer` → close | per-shard peer tables; real answers target a member of the same swarm |
-| `/stats.json` `memory` | `process.memoryUsage()` | `{ "rss": bytes }`; extra `workers`, `droppedMessages`, `placement` | |
+| `/stats.json` | `torrentsCount`, `peersCount`, `servers`, `memory` (`process.memoryUsage()`), `peersCountPerInfoHashPerTracker` | a small summary (§13.5), `?infoHash=` for one swarm; counters in `/metrics` (§13.7) | the per-info-hash list cost ~500 KB and a copy of every swarm per request in production |
+| Logging | `debug` module (`DEBUG=wt-tracker:*`), off by default | logfmt events on stderr, `logLevel` (§13.8) | runtime errors, rejections and closes were silent |
+| Message rejected on another worker | (single tracker) | close 1008, like a local rejection | |
 | Slow receivers | uWS buffers up to its backpressure limit | messages beyond `maxBackpressure` (1 MiB) per connection are dropped | bounded memory |
 | Peer identity | global per tracker (per worker in multi-worker) | per shard | sharding |
 | Stop from another connection | allowed | allowed (parity) | hardening is planned (§12) |
@@ -401,7 +403,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   idle timeout with pings, HTTP routes and ws path, origin rules, `maxConnections`, wss with a
   generated certificate, backpressure drops; `ConnId` packing unit test. Tests that need swarms
   spread over shards use `placement: "hash"`.
-- `tests/placement.rs` (4 workers, `content` placement, shards read from `/stats.json`): one
+- `tests/placement.rs` (4 workers, `content` placement, shards from `/stats.json?infoHash=`,
+  counters from `/metrics`): one
   swarm on one shard with every request local; video + audio of a connection on one shard with
   an offer / answer; a quality switch (new hash, stop of the old) on the same shard; a connection
   whose first message is a scrape is not moved and forwards; a ping before and messages after
@@ -446,13 +449,25 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   invalid UTF-8 after inflating → 1007; `compressOutgoingMinSize` compresses only messages that
   long and only for clients that negotiated; a 40 KB compressed message in 4 fragments over TLS;
   connections that move at their first compressed announce keep compression; with the default
-  (1024) an offer ≥ 1 KiB arrives compressed while short replies do not, and `/stats.json`
-  `traffic` counts the received and sent messages and bytes, the deflated and inflated bytes and
+  (1024) an offer ≥ 1 KiB arrives compressed while short replies do not, and `/metrics`
+  counts the received and sent messages and bytes, the deflated and inflated bytes and
   socket bytes (a connection moved at its first message is counted once).
   `wt-proto/tests/encode.rs`: `Encoder::counters` per kind, kept across `clear` / `take`.
 - `tests/shutdown.rs`: a graceful shutdown closes every connection with 1001 and returns once
   they are closed, then connects are refused; a zero timeout returns at once with a client that
-  never answers; the `wt-tracker` binary (Unix) closes with 1001 and exits 0 on SIGTERM. `wt-proto/tests/owned.rs`:
+  never answers; the `wt-tracker` binary (Unix) closes with 1001, logs `event=stopped` and exits
+  0 on SIGTERM (its address is read from the `event=listening` log line).
+- `tests/observability.rs` (§13.7): `/swarms` (top 3 of 6 swarms over 4 shards by peers,
+  `total`, `top=0` / default = all, `top=x` → 400, not on the public listener, its hex matching
+  `?infoHash=`); connections counted by reason (`client_close`, `rejected`
+  with `invalid_json`, `too_big`, `eof`, `bad_request`, `idle_timeout`); answers to an unknown
+  peer spread over 4 shards (`hash`) all close with 1008, local or remote rejection alike, and
+  count `unknown_peer`; no metrics listener unless configured. `tests/suite`: the exact
+  `/stats.json` keys, `?infoHash=` (unknown swarm, malformed → 400), `/metrics` only on its own
+  listener, `wt_http_requests_total`. Unit tests: logfmt quoting, RFC 3339 timestamps, the rate
+  limit, label uniqueness, metric text escaping, info_hash hex and query parsing. The test
+  helper `start()` adds a metrics listener on 127.0.0.1 (any port) unless the config has
+  `metrics`. `wt-proto/tests/owned.rs`:
   `OwnedMessage` round trip (also across threads) and `Encoder::take`.
 
   Offer receivers are not compared exactly: both sides choose them randomly, and the swarm order
@@ -699,9 +714,12 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   (listen backlog 128) a few connects were refused in one manual run. Consider prioritising
   the accept loop or `reusePort` on Linux.
 - TLS / large tests on Linux and Ampere A1 with a separate client machine; `reusePort`.
-- **Observability (planned):** structured logging (today only startup lines; runtime errors,
-  rejected messages and closes pass silently) and possibly a Prometheus endpoint next to
-  `/stats.json`.
+- **Observability (done, §13.5, §13.7, §13.8):** logfmt events on stderr (`logLevel`),
+  connections counted by close reason and messages by reject reason, Prometheus `/metrics` and
+  the largest swarms (`/swarms`) on an optional private listener, `/stats.json` reduced to a
+  summary plus `?infoHash=`. A message
+  rejected by another worker's shard now closes with 1008 (was 1000). Open: per-listener close
+  counts, histograms (connection duration, RTT), a sampled debug log of messages.
 - **Fuzzing, longer (planned):** the targets are libFuzzer / OSS-Fuzz compatible; longer runs
   than the nightly 20 min per target, e.g. through OSS-Fuzz.
 - Hardening: check the requesting connection on stop; optionally require the answer target to
@@ -732,12 +750,14 @@ defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-
 | `workers` (new) | available parallelism | 1–64; one shard each |
 | `placement` (new) | `content` | `content`: info_hash directory, swarms follow the content, connections move at their first announce; `hash`: `foldhash(info_hash) % workers`, no moves (§13.3). Unknown value → config error |
 | `reusePort` (new) | false | Linux only: one `SO_REUSEPORT` socket per worker; otherwise one shared socket |
-| `maxBackpressure` (new) | 1 MiB | per-connection queued bytes; further messages to it are dropped (`droppedMessages`) |
+| `maxBackpressure` (new) | 1 MiB | per-connection queued bytes; further messages to it are dropped (`wt_dropped_messages_total`) |
 | `indexHtml` (new) | `./index.html` if present | served at `GET /` |
 | `shutdownTimeout` (new) | 5 | seconds a graceful shutdown waits for connections to close (§13.6) |
+| `logLevel` (new) | `info` | `error` / `warn` / `info` / `debug` (§13.8); unknown value → config error |
+| `metrics` (new) | — (off) | `{"host", "port"}` (defaults `127.0.0.1`, 9100): private plain HTTP listener for `GET /metrics` and `GET /swarms` (§13.7), accepted by worker 0; port 0 = any (`Server::metrics_addr`) |
 
 Unknown fields are ignored. Invalid config (wrong types, both origin lists, half a key pair,
-`workers` out of range, unknown `offerSelection` or `placement`) → error at startup.
+`workers` out of range, unknown `offerSelection`, `placement` or `logLevel`) → error at startup.
 
 ### 13.2 Connections and HTTP
 
@@ -748,7 +768,8 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
   like uws-tracker) and, if negotiated, `Sec-WebSocket-Extensions` (below). Bytes sent right
   after the head are kept.
 - Otherwise: `GET /` → `index.html` (200) or `404 Not Found`; `GET /stats.json` (§13.5); anything
-  else → `404 Not Found`. HTTP responses close the connection.
+  else → `404 Not Found`. HTTP responses close the connection. `/metrics` and `/swarms` are served
+  only on the metrics listener (§13.7).
 - WebSocket (`src/ws`): own RFC 6455 server framing, one task per connection, driven by socket
   readiness (`ready` + `try_read` / `try_write_vectored`):
   - **Shared buffers per worker thread:** every connection reads into one buffer of its worker
@@ -791,7 +812,7 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
     frames, stray continuations → 1002; message (compressed or inflated) > `maxPayloadLength` →
     1009; corrupt compressed data → 1007;
     invalid UTF-8 in a text message or close reason → 1007; a message rejected by the tracker
-    (§7.3) → 1008; a received close frame is answered with its code (1000 without one); idle
+    (§7.3), by the local shard or by another worker's → 1008; a received close frame is answered with its code (1000 without one); idle
     timeout (no frame for `idleTimeout`, pings every `idleTimeout / 2`) or a close from the server
     side → 1000. Pings are answered with pongs, in order, before queued data. The close frame is
     written within 1 s, then TLS `close_notify` and TCP shutdown; the connection's peers are
@@ -851,7 +872,8 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
 - The owning shard's output is encoded once per batch (`Encoder::take`): each message is a slice
   of one buffer, delivered to its connection's queue (local) or batched per destination worker
   (one channel send per destination per scheduler tick).
-- A rejected message on a remote shard closes the connection on its own worker (`Close` event).
+- A rejected message on a remote shard closes the connection with 1008 on its own worker (`Close`
+  event); the rejecting worker counts it (§13.7).
 - Each connection remembers which shards it announced to; on close every one of them gets a
   disconnect, through the same FIFO as its requests. (A request forwarded again because its
   binding changed in flight can race a close; the peer then expires after
@@ -862,24 +884,26 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
 Scrape of all swarms or of several hashes is scattered to the shards owning them and gathered
 (`content`: hashes not in the directory are asked nowhere and reported 0 / 0); entries are
 encoded in request order with the first occurrence kept (§7.2), all swarms in shard order.
-`/stats.json` gathers `(info_hash, peers)` and the request counters of every shard.
+`/stats.json` and `/metrics` gather counts (swarms, summed peers) and counters of every worker
+through its inbox (`Event::Stats`; `?infoHash=`: `Event::Swarm`, one swarm's peers), waiting at
+most 1 s for each: a worker that does not answer is reported as down (`wt_worker_up 0`, its counts
+missing from the sums) and logged (`worker_not_responding`), so a stuck worker cannot block the
+endpoints. No swarm list is copied.
 
 ### 13.5 `/stats.json`
 
 `{"torrentsCount", "peersCount", "servers":[{"server":"host:port","webSocketsCount"}],
-"memory":{"rss"}, "workers", "droppedMessages", "placement":{"mode", "movedConnections",
-"localRequests", "remoteRequests", "workers":[{"connections", "busy"} per worker],
-"directorySize"}, "traffic":{…}, "peersCountPerInfoHashPerTracker":[{"totalPeers",
-"<hex info_hash>": peers, …} per shard]}`. `localRequests` / `remoteRequests`: requests of each
-worker's connections applied to its own shard / sent to another one (scrape gathers not counted);
-`busy`: 0–1, `content` only. `traffic` (totals of all workers since start, each `{"messages",
-"bytes"}`): `sent` (`announceReplies`, `offers`, `answers`, `scrapes`: JSON bytes as encoded, before
-framing and compression, counted by the shard that produced them), `received` (`announces`,
-`answers`, `stops`, `scrapes`, `invalid`: JSON bytes after inflating, counted once by the worker
-that handles them), `socketBytes` `{"in", "out"}` (bytes read from / written to sockets, TLS and
-the HTTP upgrade included), `compression` `{"deflated", "inflated"}` each `{"messages",
-"bytesBefore", "bytesAfter"}`. The hex is computed like JS `Buffer.from(infoHash,
-"binary").toString("hex")` (one byte per character).
+"memory":{"rss"}, "workers", "uptimeSeconds"}`: swarms of all shards; peers summed over the swarms
+(a peer in two swarms counts twice); open WebSockets per listener; resident set size in bytes
+(`/proc/self/status`, else `ps`; `null` if unavailable); seconds since start. Every counter is in
+`/metrics` (§13.7).
+
+`GET /stats.json?infoHash=<hex>` (2 to 80 hex digits, any case): one swarm,
+`{"infoHash":"<lowercase hex>", "peers", "workers":[{"worker", "peers"}]}` with the workers whose
+shard has it (normally one; `[]` and 0 if none). The hex encodes the info_hash as clients send it,
+a "binary" string with one character per byte, so a byte ≥ 0x80 is the key's two UTF-8 bytes.
+Malformed hex → `400 Bad Request`. The list of swarms is on the private listener (`/swarms`,
+§13.7).
 
 ### 13.6 Shutdown
 
@@ -894,6 +918,63 @@ the HTTP upgrade included), `compression` `{"deflated", "inflated"}` each `{"mes
   WebSocket left or at the deadline (`shutdownTimeout` seconds; 0 = do not wait); connections
   still open then (and HTTP requests in progress) are dropped.
 - `Server::shutdown` / dropping the `Server`: stop at once (in-process use, tests).
+
+### 13.7 `/metrics` and `/swarms`
+
+The `metrics` listener (plain HTTP, off without the setting) serves `GET /metrics` and
+`GET /swarms`; anything else → 404.
+
+`GET /swarms?top=N` (default 100; 0 = all; not a number → 400): the largest swarms of all
+workers, `{"swarms":[{"infoHash":"<hex as in §13.5>", "peers", "worker"}], "total":<swarms of
+all workers>}`, most peers first, equal counts by hex (which swarms make the cut among equal counts
+at the limit is arbitrary). Each worker returns only its own `top` (an `Event::Swarms` gather as in
+§13.4, copying just those keys). It shows what viewers watch, hence the private listener.
+
+`/metrics`: Prometheus text format 0.0.4 (`text/plain; version=0.0.4`). Per-worker series
+carry `worker="N"`; counters are totals since start, kept per worker in plain cells (no atomics on
+the hot path) and gathered as in §13.4. Families:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `wt_build_info` | gauge | `version` | 1 |
+| `process_start_time_seconds`, `process_resident_memory_bytes` | gauge | – | start time (Unix seconds), RSS (if available) |
+| `wt_worker_up` | gauge | worker | 1 if the worker answered within 1 s |
+| `wt_torrents`, `wt_peers` | gauge | worker | swarms, peers summed over swarms |
+| `wt_connections` | gauge | worker | open WebSocket connections (placement loads) |
+| `wt_worker_busy_ratio` | gauge | worker | runtime busy share, moving average (`content`, > 1 worker) |
+| `wt_listener_connections` | gauge | `listener` | open WebSockets per listener (`host:port`) |
+| `wt_received_messages_total`, `wt_received_bytes_total` | counter | worker, `kind` | `announce`, `answer`, `stop`, `scrape`, `invalid` (not parsed); JSON bytes after inflating, counted once by the handling worker |
+| `wt_sent_messages_total`, `wt_sent_bytes_total` | counter | worker, `kind` | `announce_reply`, `offer`, `answer`, `scrape`; JSON bytes before framing and compression, counted by the producing shard |
+| `wt_rejected_messages_total` | counter | worker, `reason` | `invalid_json`, `not_an_object`, `unknown_action`, `unknown_event`, `bad_field`, `key_too_long`, `unknown_peer` (from `ProtoError` / `TrackerError`; counted by the rejecting worker) |
+| `wt_closed_connections_total` | counter | worker, `reason` | WebSocket: `client_close` (close frame from the client), `idle_timeout`, `protocol_error` (1002), `too_big` (1009), `invalid_data` (1007), `rejected` (1008), `server_close` (1000 from the server), `shutdown` (1001), `eof`, `socket_error`; before the upgrade: `tls_handshake` (failed or > 10 s), `bad_request` (no valid head within 10 s), `max_connections`, `origin_denied`, `bad_upgrade` (e.g. no `Sec-WebSocket-Key`). Counted by the worker holding the connection when it ends; HTTP requests are in `wt_http_requests_total` |
+| `wt_http_requests_total` | counter | worker, `route` | `stats`, `index`, `not_found` |
+| `wt_socket_bytes_total` | counter | worker, `direction` | `in`, `out`: socket bytes, TLS and the HTTP upgrade included |
+| `wt_deflate_messages_total`, `wt_inflate_messages_total` | counter | worker | outgoing messages compressed, incoming compressed messages |
+| `wt_deflate_bytes_total`, `wt_inflate_bytes_total` | counter | worker, `stage` | `before`, `after` compression / inflating |
+| `wt_routed_requests_total` | counter | worker, `target` | `local` / `remote`: requests of the worker's connections applied to its own shard / sent to another (scrape gathers not counted) |
+| `wt_moved_connections_total` | counter | worker | connections that moved to the worker (§13.3) |
+| `wt_expired_peers_total` | counter | worker | peers removed by expiry |
+| `wt_dropped_messages_total` | counter | – | messages dropped by `maxBackpressure` |
+| `wt_directory_entries` | gauge | – | info_hashes bound in the directory (`content`) |
+
+### 13.8 Logging
+
+One logfmt line per event on stderr: `ts=<RFC 3339 UTC, ms> level=<level> event=<name>
+key=value…` (`ts` omitted when `JOURNAL_STREAM` is set: journald stamps lines). Values with a
+space, `=`, `"`, `\` or a control character, or empty, are quoted with `\"`, `\\`, `\n`, `\r`,
+`\t`, `\u{…}` escapes. `logLevel` filters (a disabled event costs one relaxed atomic load). Hot-path
+events marked *limited* are written at most once per 10 s per event per worker thread; the next
+line written carries `suppressed=N`. Library warnings and errors (rustls, via the `log` crate)
+become `event=library target=… message=…`.
+
+| Level | Events |
+|---|---|
+| error | `config_read_failed`, `config_invalid`, `start_failed` (exit 1); `accept_failed` (*limited*, e.g. EMFILE; `listener`, `error`) |
+| warn | `config_warning` (ignored JS options); `worker_not_responding` (*limited*); `stopped_without_waiting` (second signal) |
+| info | `listening` (`addr`, per listener), `metrics_listening`, `started` (`version`, `workers`, `placement`); `shutting_down`, `stopped`; `rejected_message` (*limited*; `reason`, `error`, `worker`) |
+| debug | `connection_closed` (`reason` as in §13.7, `peer`, `duration_s`, `worker`) for every connection, upgraded or not; `upgrade_denied` (`reason`, `peer`); `tls_handshake_failed` (`peer`, `error`); `not_found` (`peer`, `path`) |
+
+Configuration errors before the level is known are written at any level.
 
 ## 14. Load test (`crates/wt-loadgen`, `loadtest/run.sh`)
 
@@ -928,8 +1009,9 @@ the HTTP upgrade included), `compression` `{"deflated", "inflated"}` each `{"mes
   (`run-tracker.ts`), the JS multi-worker tracker (`run-worker-tracker.ts`), Rust with 1 worker,
   with all cores (`content` placement) and with all cores and `placement: "hash"`
   (`rust-n-hash`), each in a fresh process with the same config (`compression: 0`,
-  `announceInterval: 120`). After each run it keeps the server's `/stats.json` `placement`
-  (Rust): the Local % column. Profile deflate (`DEFLATE_CONNS`=3000, every 5 s, ws, `--deflate`)
+  `announceInterval: 120`, a metrics listener on 127.0.0.1:18190, ignored by JS). After each run
+  it keeps the Rust server's `placement` counters (`localRequests`, `remoteRequests`,
+  `movedConnections` summed from `/metrics` with awk): the Local % column. Profile deflate (`DEFLATE_CONNS`=3000, every 5 s, ws, `--deflate`)
   runs its own targets: `js`, `rust-1`, `rust-n` with `compression: 1` (Rust compressing outgoing
   messages ≥ 1 KiB, the default), `rust-n-in` (`compressOutgoingMinSize: 0`: inflating only, like
   JS) and `rust-n-off` (`compression: 0`: the uncompressed baseline with the same client); the
@@ -944,5 +1026,6 @@ the HTTP upgrade included), `compression` `{"deflated", "inflated"}` each `{"mes
   sharing its CPUs: targets `aquatic-1` (1 socket + 1 swarm worker), `aquatic-n` (N threads:
   N − ⌊N/4⌋ socket, ⌊N/4⌋ swarm workers), `rust-1`, `rust-n` (N workers, `reusePort`). aquatic config:
   its defaults (`aquatic_ws -p`) with address, workers, TLS and `peer_announce_interval = 120`
-  changed. Server CPU and RSS from `/proc` (RSS from `VmRSS`). Writes `bench/results/aquatic.json`
+  changed; `wt-tracker` with a metrics listener (placement counters as in `run.sh`). Server CPU and
+  RSS from `/proc` (RSS from `VmRSS`). Writes `bench/results/aquatic.json`
   and a second load table in §11. No wire smoke check (aquatic's replies differ from JS).

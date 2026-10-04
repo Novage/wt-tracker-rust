@@ -1,0 +1,3 @@
+GET /stats.json?infoHash=68736f6d65ff00&x=1 HTTP/1.1
+Host: x
+

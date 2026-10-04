@@ -45,15 +45,15 @@ async fn offers_and_answers_across_workers_and_shards() {
         keep.push((a, b));
     }
     // The swarms really are spread over several shards.
-    let stats = stats(&server).await;
-    let used = stats["peersCountPerInfoHashPerTracker"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|s| s["totalPeers"].as_u64().unwrap() > 0)
+    let m = metrics(&server).await;
+    let used = (0..4)
+        .filter(|w| m.sum("wt_peers", &[("worker", &w.to_string())]) > 0)
         .count();
-    assert!(used >= 2, "{stats}");
-    assert_eq!(stats["peersCount"], 16);
+    assert!(used >= 2, "swarms on {used} shards");
+    assert_eq!(stats(&server).await["peersCount"], 16);
+    let first = swarm(&server, H[0]).await;
+    assert_eq!(first["peers"], 2, "{first}");
+    assert_eq!(first["workers"].as_array().unwrap().len(), 1, "{first}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -257,15 +257,49 @@ async fn http_routes_and_ws_path() {
         ("HTTP/1.1 404 Not Found".into(), "404 Not Found".into())
     );
     let stats = stats(&server).await;
-    for key in [
-        "torrentsCount",
-        "peersCount",
-        "servers",
-        "memory",
-        "peersCountPerInfoHashPerTracker",
-    ] {
-        assert!(stats.get(key).is_some(), "{key} missing in {stats}");
-    }
+    let mut keys: Vec<&str> = stats
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "memory",
+            "peersCount",
+            "servers",
+            "torrentsCount",
+            "uptimeSeconds",
+            "workers"
+        ],
+        "{stats}"
+    );
+    assert_eq!(stats["servers"][0]["webSocketsCount"], 0);
+    // An unknown swarm, and a malformed infoHash.
+    let unknown = swarm(&server, "nothing here").await;
+    assert_eq!(
+        (unknown["peers"].clone(), unknown["workers"].clone()),
+        (0.into(), serde_json::json!([]))
+    );
+    assert_eq!(
+        http_get(addr, "/stats.json?infoHash=xyz").await.0,
+        "HTTP/1.1 400 Bad Request"
+    );
+    // `/metrics` is only on its own listener.
+    assert_eq!(http_get(addr, "/metrics").await.0, "HTTP/1.1 404 Not Found");
+    let metrics_addr = server.metrics_addr().unwrap();
+    assert_eq!(
+        http_get(metrics_addr, "/").await.0,
+        "HTTP/1.1 404 Not Found"
+    );
+    let m = metrics(&server).await;
+    assert_eq!(m.sum("wt_http_requests_total", &[("route", "index")]), 1);
+    assert_eq!(
+        m.sum("wt_http_requests_total", &[("route", "not_found")]),
+        2
+    );
     // Upgrades only on the configured path.
     assert!(
         tokio_tungstenite::connect_async(format!("ws://{addr}/"))
@@ -399,8 +433,7 @@ async fn backpressure_drops_messages_for_a_client_that_does_not_read() {
         send(&mut busy, &frame).await;
         recv(&mut busy).await.unwrap();
     }
-    let stats = stats(&server).await;
-    assert!(stats["droppedMessages"].as_u64().unwrap() > 0, "{stats}");
+    assert!(metrics(&server).await.sum("wt_dropped_messages_total", &[]) > 0);
     // The server and the busy peer are fine.
     send(&mut busy, r#"{"action":"scrape"}"#).await;
     assert!(

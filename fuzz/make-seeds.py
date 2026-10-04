@@ -85,6 +85,10 @@ request = (
 )
 write("http_upgrade", "upgrade", request.encode())
 write("http_upgrade", "stats", b"GET /stats.json HTTP/1.1\r\nHost: x\r\n\r\n")
+write("http_upgrade", "stats-infohash",
+      b"GET /stats.json?infoHash=68736f6d65ff00&x=1 HTTP/1.1\r\nHost: x\r\n\r\n")
+write("http_upgrade", "metrics", b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1:9100\r\n\r\n")
+write("http_upgrade", "swarms", b"GET /swarms?top=25 HTTP/1.1\r\nHost: 127.0.0.1:9100\r\n\r\n")
 write("http_upgrade", "extensions",
       b"permessage-deflate; server_no_context_takeover; client_max_window_bits=12, x-webkit-deflate-frame")
 

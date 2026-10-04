@@ -20,6 +20,7 @@ use wt_proto::{Batch, Count, Encoder, Message, OwnedMessage, ProtoError};
 
 use crate::conn;
 use crate::placement::{self, Mode};
+use crate::reasons::{CloseReason, Counts, HttpRoute, RejectReason};
 use crate::ws::codec::close;
 use crate::ws::driver::{IoCounters, io_counters};
 use crate::{Phase, Shared};
@@ -44,19 +45,32 @@ pub(crate) enum Event {
         info_hashes: Option<Vec<Vec<u8>>>,
         reply: oneshot::Sender<Vec<ScrapeEntry>>,
     },
-    /// Swarms and counters of this shard, for `/stats.json`.
+    /// Counts and counters of this shard, for `/stats.json` and `/metrics`.
     Stats { reply: oneshot::Sender<ShardStats> },
+    /// Peers of one swarm in this shard (`None`: no such swarm), for `/stats.json?infoHash=`.
+    Swarm {
+        info_hash: Vec<u8>,
+        reply: oneshot::Sender<Option<u32>>,
+    },
+    /// The `top` largest swarms of this shard (0: all) and its swarm count, for `/swarms`.
+    Swarms {
+        top: usize,
+        reply: oneshot::Sender<TopSwarms>,
+    },
     /// A connection moved to this worker at its first message (`content` placement).
     Adopt(Box<conn::Adopt>),
     /// A request of the connection was forwarded to `shard`: it may hold its peers now.
     Track { conn: ConnId, shard: usize },
 }
 
-/// Per-shard part of `/stats.json`.
+/// One worker's part of `/stats.json` and `/metrics`. `Default` (`up: false`): the worker did
+/// not answer in time.
 #[derive(Default)]
 pub(crate) struct ShardStats {
-    /// `(info_hash, peers)` of every swarm.
-    pub swarms: Vec<(Vec<u8>, u32)>,
+    pub up: bool,
+    /// Swarms in the shard, and peers summed over them (a peer in two swarms counts twice).
+    pub swarms: usize,
+    pub peers: usize,
     /// Requests of this worker's connections applied to its own shard / sent to another.
     pub local_requests: u64,
     pub remote_requests: u64,
@@ -68,7 +82,21 @@ pub(crate) struct ShardStats {
     pub received: Received,
     /// Socket and compression totals of the worker thread.
     pub io: IoCounters,
+    /// Connections that ended, per [`CloseReason`] (counted by the worker that held them).
+    pub closed: [u64; CloseReason::COUNT],
+    /// Messages rejected, per [`RejectReason`] (counted by the worker that rejected them).
+    pub rejected: [u64; RejectReason::COUNT],
+    /// HTTP requests answered without an upgrade, per [`HttpRoute`].
+    pub http: [u64; HttpRoute::COUNT],
+    /// Peers removed by expiry.
+    pub expired: u64,
 }
+
+/// A shard's largest swarms `(info_hash key, peers)`, and its swarm count.
+pub(crate) type TopSwarms = (Vec<(Vec<u8>, u32)>, usize);
+
+/// How long a stats gather waits for each other worker.
+const STATS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Messages received (JSON bytes after inflating), per kind; `invalid`: not parsed.
 #[derive(Clone, Copy, Debug, Default)]
@@ -170,6 +198,10 @@ pub(crate) struct Worker {
     remote_requests: Cell<u64>,
     moved_in: Cell<u64>,
     received: Cell<Received>,
+    closed: Counts<{ CloseReason::COUNT }>,
+    rejected: Counts<{ RejectReason::COUNT }>,
+    http: Counts<{ HttpRoute::COUNT }>,
+    expired: Cell<u64>,
 }
 
 impl Worker {
@@ -191,7 +223,33 @@ impl Worker {
             remote_requests: Cell::new(0),
             moved_in: Cell::new(0),
             received: Cell::new(Received::default()),
+            closed: Counts::default(),
+            rejected: Counts::default(),
+            http: Counts::default(),
+            expired: Cell::new(0),
         }
+    }
+
+    /// Counts a connection that ended (or was refused before the upgrade).
+    pub fn count_close(&self, reason: CloseReason) {
+        self.closed.add(reason as usize, 1);
+    }
+
+    pub fn count_http(&self, route: HttpRoute) {
+        self.http.add(route as usize, 1);
+    }
+
+    /// Counts and logs (rate-limited) a rejected message.
+    fn reject(&self, e: &ProtoError) {
+        let reason = RejectReason::from(e);
+        self.rejected.add(reason as usize, 1);
+        crate::event_limited!(
+            Info,
+            "rejected_message",
+            reason = reason.as_str(),
+            error = e,
+            worker = self.id
+        );
     }
 
     /// Tracker clock: seconds since the worker started.
@@ -393,10 +451,10 @@ impl Worker {
         }
     }
 
-    /// Closes any connection, local or on another worker.
-    fn close_any(self: &Rc<Self>, conn: ConnId) {
+    /// Closes a connection whose message was rejected (1008), local or on another worker.
+    fn close_rejected(self: &Rc<Self>, conn: ConnId) {
         match conn_worker(conn) {
-            w if w == self.id => self.begin_close(conn),
+            w if w == self.id => self.begin_close_with(conn, close::POLICY),
             w => self.push_remote(w, Event::Close { conn }),
         }
     }
@@ -416,6 +474,7 @@ impl Worker {
             Ok(message) => message,
             Err(e) => {
                 self.count_received(|r| r.invalid.add(frame.len()));
+                self.reject(&e);
                 return Err(e);
             }
         };
@@ -425,7 +484,10 @@ impl Worker {
                 .get_mut(conn_slot(conn))
                 .is_some_and(|entry| !std::mem::replace(&mut entry.placed, true))
         };
-        match self.route_message(conn, frame, &message, first)? {
+        let routed = self
+            .route_message(conn, frame, &message, first)
+            .inspect_err(|e| self.reject(e))?;
+        match routed {
             Routed::Done => {}
             Routed::Scrape(job) => {
                 let me = self.clone();
@@ -593,15 +655,14 @@ impl Worker {
                                 self.track(conn, owner);
                                 continue;
                             }
-                            if wt_proto::apply(
+                            if let Err(e) = wt_proto::apply(
                                 &mut shard,
                                 now,
                                 conn,
                                 &message.message(),
                                 &mut encoder,
-                            )
-                            .is_err()
-                            {
+                            ) {
+                                self.reject(&e);
                                 rejected.push(conn);
                             }
                         }
@@ -616,6 +677,12 @@ impl Worker {
                         Event::Stats { reply } => {
                             let _ = reply.send(self.shard_stats(&shard, encoder.counters()));
                         }
+                        Event::Swarm { info_hash, reply } => {
+                            let _ = reply.send(shard.swarm_stats(&info_hash).map(|s| s.peers));
+                        }
+                        Event::Swarms { top, reply } => {
+                            let _ = reply.send(top_swarms(&shard, top));
+                        }
                         Event::Adopt(adopt) => {
                             spawn_local(conn::adopted(self.clone(), *adopt));
                         }
@@ -626,7 +693,7 @@ impl Worker {
             let batch = self.encoder.borrow_mut().take();
             self.dispatch(batch);
             for conn in rejected {
-                self.close_any(conn);
+                self.close_rejected(conn);
             }
         }
     }
@@ -710,38 +777,88 @@ impl Worker {
     /// `sent`: the encoder's counters (it may be borrowed by the caller).
     fn shard_stats(&self, shard: &Shard, sent: wt_proto::Counters) -> ShardStats {
         ShardStats {
-            swarms: shard
-                .swarms()
-                .map(|(h, s)| (h.as_bytes().to_vec(), s.peers))
-                .collect(),
+            up: true,
+            swarms: shard.swarm_count(),
+            peers: shard.membership_count(),
             local_requests: self.local_requests.get(),
             remote_requests: self.remote_requests.get(),
             moved_in: self.moved_in.get(),
             sent,
             received: self.received.get(),
             io: io_counters(),
+            closed: self.closed.get(),
+            rejected: self.rejected.get(),
+            http: self.http.get(),
+            expired: self.expired.get(),
         }
     }
 
-    /// Swarms and counters of all shards, per shard (for `/stats.json`).
+    /// Counts and counters of every worker, in worker order. A worker that does not answer
+    /// within [`STATS_TIMEOUT`] is reported with `up: false`.
     pub async fn stats(self: &Rc<Self>) -> Vec<ShardStats> {
-        let mut per_shard: Vec<ShardStats> = (0..self.shared.workers)
-            .map(|_| ShardStats::default())
-            .collect();
+        self.gather(
+            |reply| Event::Stats { reply },
+            |me| me.shard_stats(&me.shard.borrow(), me.encoder.borrow().counters()),
+        )
+        .await
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect()
+    }
+
+    /// Peers of one swarm in every worker (`None`: no swarm there, or no answer).
+    pub async fn swarm_peers(self: &Rc<Self>, info_hash: &[u8]) -> Vec<Option<u32>> {
+        self.gather(
+            |reply| Event::Swarm {
+                info_hash: info_hash.to_vec(),
+                reply,
+            },
+            |me| me.shard.borrow().swarm_stats(info_hash).map(|s| s.peers),
+        )
+        .await
+        .into_iter()
+        .map(Option::flatten)
+        .collect()
+    }
+
+    /// The largest swarms of every worker (`top` each, 0: all), in worker order; a worker that
+    /// does not answer in time contributes none.
+    pub async fn top_swarms(self: &Rc<Self>, top: usize) -> Vec<TopSwarms> {
+        self.gather(
+            |reply| Event::Swarms { top, reply },
+            |me| top_swarms(&me.shard.borrow(), top),
+        )
+        .await
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect()
+    }
+
+    /// Asks every worker (`local` for this one, an event for the others); `None` for a worker
+    /// that does not answer within [`STATS_TIMEOUT`].
+    async fn gather<T>(
+        self: &Rc<Self>,
+        event: impl Fn(oneshot::Sender<T>) -> Event,
+        local: impl FnOnce(&Self) -> T,
+    ) -> Vec<Option<T>> {
+        let mut results: Vec<Option<T>> = (0..self.shared.workers).map(|_| None).collect();
         let mut pending = Vec::new();
-        for (shard, slot) in per_shard.iter_mut().enumerate() {
-            if shard == self.id {
-                *slot = self.shard_stats(&self.shard.borrow(), self.encoder.borrow().counters());
-            } else {
+        for worker in 0..self.shared.workers {
+            if worker != self.id {
                 let (reply, rx) = oneshot::channel();
-                self.push_remote(shard, Event::Stats { reply });
-                pending.push((shard, rx));
+                self.push_remote(worker, event(reply));
+                pending.push((worker, rx));
             }
         }
-        for (shard, rx) in pending {
-            per_shard[shard] = rx.await.unwrap_or_default();
+        results[self.id] = Some(local(self));
+        let deadline = tokio::time::Instant::now() + STATS_TIMEOUT;
+        for (worker, rx) in pending {
+            match tokio::time::timeout_at(deadline, rx).await {
+                Ok(Ok(value)) => results[worker] = Some(value),
+                _ => crate::event_limited!(Warn, "worker_not_responding", worker = worker),
+            }
         }
-        per_shard
+        results
     }
 
     async fn expiry(self: Rc<Self>) {
@@ -750,7 +867,8 @@ impl Worker {
             tokio::time::sleep(interval).await;
             let batch = {
                 let mut encoder = self.encoder.borrow_mut();
-                self.shard.borrow_mut().expire(self.now(), &mut *encoder);
+                let expired = self.shard.borrow_mut().expire(self.now(), &mut *encoder);
+                self.expired.set(self.expired.get() + expired as u64);
                 encoder.take()
             };
             self.dispatch(batch);
@@ -785,6 +903,20 @@ impl Worker {
             self.shared.loads.sample_busy(self.id, busy_secs, wall);
         }
     }
+}
+
+/// The `top` swarms with the most peers (0: all), unordered; copies only their keys.
+fn top_swarms(shard: &Shard, top: usize) -> TopSwarms {
+    let mut swarms: Vec<(u32, &Key)> = shard.swarms().map(|(key, s)| (s.peers, key)).collect();
+    if top > 0 && swarms.len() > top {
+        swarms.select_nth_unstable_by(top - 1, |a, b| b.0.cmp(&a.0));
+        swarms.truncate(top);
+    }
+    let keys = swarms
+        .into_iter()
+        .map(|(peers, key)| (key.as_bytes().to_vec(), peers))
+        .collect();
+    (keys, shard.swarm_count())
 }
 
 fn scrape_entries(shard: &Shard, info_hashes: Option<&[Vec<u8>]>) -> Vec<ScrapeEntry> {
@@ -822,6 +954,7 @@ pub(crate) fn run(
     shared: Arc<Shared>,
     inbox: mpsc::UnboundedReceiver<Vec<Event>>,
     listeners: Vec<WorkerListener>,
+    metrics: Option<StdListener>,
     mut phase: watch::Receiver<Phase>,
 ) {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -837,13 +970,17 @@ pub(crate) fn run(
         if !me.hashed() {
             spawn_local(me.clone().load_ticker());
         }
-        let accepting: Vec<_> = listeners
+        let mut accepting: Vec<_> = listeners
             .into_iter()
             .map(|listener| {
                 let socket = TcpListener::from_std(listener.socket).expect("listener");
                 spawn_local(conn::accept_loop(me.clone(), listener.index, socket))
             })
             .collect();
+        if let Some(socket) = metrics {
+            let socket = TcpListener::from_std(socket).expect("metrics listener");
+            accepting.push(spawn_local(crate::metrics::accept_loop(me.clone(), socket)));
+        }
         let Ok(Phase::Drain(deadline)) = phase.wait_for(|p| *p != Phase::Running).await.map(|p| *p)
         else {
             return;

@@ -4,50 +4,66 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use wt_server::Config;
+use wt_server::{Config, event};
 
 fn main() -> ExitCode {
-    let text = match std::env::args().nth(1) {
-        Some(path) => match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) => {
-                eprintln!("failed to read configuration file {path}: {e}");
-                return ExitCode::FAILURE;
-            }
-        },
+    let (path, read) = match std::env::args().nth(1) {
+        Some(path) => {
+            let read = std::fs::read_to_string(&path);
+            (path, read)
+        }
         None => match std::fs::read_to_string("config.json") {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
-            Err(e) => {
-                eprintln!("failed to read configuration file: {e}");
-                return ExitCode::FAILURE;
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ("".into(), Ok("{}".into())),
+            read => ("config.json".into(), read),
         },
+    };
+    let text = match read {
+        Ok(text) => text,
+        Err(e) => {
+            event!(Error, "config_read_failed", path = path, error = e);
+            return ExitCode::FAILURE;
+        }
     };
 
     let config = match Config::from_json(&text) {
         Ok(config) => config,
         Err(e) => {
-            eprintln!("{e}");
+            event!(Error, "config_invalid", path = path, error = e);
             return ExitCode::FAILURE;
         }
     };
+    // Validated by `from_json`.
+    wt_server::logging::init(
+        config
+            .log_level()
+            .unwrap_or(wt_server::logging::Level::Info),
+    );
     for warning in config.warnings() {
-        eprintln!("warning: {warning}");
+        event!(Warn, "config_warning", message = warning);
     }
     let timeout = Duration::from_secs(config.shutdown_timeout);
+    let placement = config.placement.clone().unwrap_or_else(|| "content".into());
 
     let server = match wt_server::start(config) {
         Ok(server) => server,
         Err(e) => {
-            eprintln!("failed to start the server: {e}");
+            event!(Error, "start_failed", error = e);
             return ExitCode::FAILURE;
         }
     };
     for addr in server.local_addrs() {
-        println!("listening {addr}");
+        event!(Info, "listening", addr = addr);
     }
-    println!("{} workers", server.workers());
+    if let Some(addr) = server.metrics_addr() {
+        event!(Info, "metrics_listening", addr = addr);
+    }
+    event!(
+        Info,
+        "started",
+        version = env!("CARGO_PKG_VERSION"),
+        workers = server.workers(),
+        placement = placement
+    );
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -55,17 +71,20 @@ fn main() -> ExitCode {
         .expect("signal runtime");
     runtime.block_on(async {
         signal().await;
-        println!(
-            "shutting down: closing connections (up to {timeout:?}; a second signal stops now)"
+        event!(
+            Info,
+            "shutting_down",
+            timeout_s = timeout.as_secs(),
+            note = "closing connections; a second signal stops now"
         );
         let graceful = tokio::task::spawn_blocking(move || server.shutdown_gracefully(timeout));
         tokio::select! {
             _ = graceful => {
-                println!("stopped");
+                event!(Info, "stopped");
                 ExitCode::SUCCESS
             }
             _ = signal() => {
-                eprintln!("stopped without waiting for connections");
+                event!(Warn, "stopped_without_waiting");
                 // Not a return: dropping the runtime would wait for the graceful shutdown.
                 std::process::exit(1)
             }

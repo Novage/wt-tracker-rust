@@ -14,8 +14,17 @@ use wt_server::{Config, Server};
 pub const WAIT: Duration = Duration::from_secs(5);
 
 /// Starts a server from a JSON config; listeners on 127.0.0.1 with port 0 unless given.
+/// Adds a `/metrics` listener on 127.0.0.1 (any port) unless the config has `metrics`.
 pub fn start(config: &str) -> Server {
-    let config = Config::from_json(config).expect("config");
+    let mut value: serde_json::Value = serde_json::from_str(config).expect("config JSON");
+    let object = value.as_object_mut().expect("config object");
+    if !object.contains_key("metrics") {
+        object.insert(
+            "metrics".into(),
+            serde_json::json!({ "host": "127.0.0.1", "port": 0 }),
+        );
+    }
+    let config = Config::from_json(&value.to_string()).expect("config");
     wt_server::start(config).expect("start")
 }
 
@@ -139,6 +148,87 @@ pub async fn stats(server: &Server) -> serde_json::Value {
     let (status, body) = http_get(server.local_addrs()[0], "/stats.json").await;
     assert_eq!(status, "HTTP/1.1 200 OK");
     serde_json::from_str(&body).unwrap()
+}
+
+/// One swarm from `/stats.json?infoHash=`: `{"infoHash", "peers", "workers": [{"worker", "peers"}]}`.
+pub async fn swarm(server: &Server, info_hash: &str) -> serde_json::Value {
+    let hex: String = info_hash.bytes().map(|b| format!("{b:02x}")).collect();
+    let (status, body) = http_get(
+        server.local_addrs()[0],
+        &format!("/stats.json?infoHash={hex}"),
+    )
+    .await;
+    assert_eq!(status, "HTTP/1.1 200 OK", "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+/// Workers that hold a swarm for `info_hash`.
+pub async fn swarm_workers(server: &Server, info_hash: &str) -> Vec<usize> {
+    swarm(server, info_hash).await["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["worker"].as_u64().unwrap() as usize)
+        .collect()
+}
+
+/// One `/metrics` sample: name, labels, value.
+pub type Sample = (String, Vec<(String, String)>, f64);
+
+/// Parsed `/metrics` samples.
+pub struct Metrics(pub Vec<Sample>);
+
+impl Metrics {
+    /// Sum of the samples of `name` whose labels include every `filter` (e.g. all workers).
+    pub fn sum(&self, name: &str, filters: &[(&str, &str)]) -> u64 {
+        let total: f64 = self
+            .0
+            .iter()
+            .filter(|(n, labels, _)| {
+                n == name
+                    && filters
+                        .iter()
+                        .all(|(k, v)| labels.iter().any(|(lk, lv)| lk == k && lv == v))
+            })
+            .map(|(_, _, value)| value)
+            .sum();
+        total as u64
+    }
+
+    pub fn has(&self, name: &str) -> bool {
+        self.0.iter().any(|(n, _, _)| n == name)
+    }
+}
+
+/// GET `/metrics` from the server's metrics listener.
+pub async fn metrics(server: &Server) -> Metrics {
+    let addr = server.metrics_addr().expect("metrics listener");
+    let (status, body) = http_get(addr, "/metrics").await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    Metrics(body.lines().filter_map(parse_sample).collect())
+}
+
+/// `name{k="v",...} value` (labels without `"` or `,` in tests).
+fn parse_sample(line: &str) -> Option<Sample> {
+    if line.starts_with('#') || line.is_empty() {
+        return None;
+    }
+    let (series, value) = line.rsplit_once(' ')?;
+    let (name, labels) = match series.split_once('{') {
+        Some((name, rest)) => {
+            let labels = rest
+                .trim_end_matches('}')
+                .split(',')
+                .filter_map(|pair| {
+                    let (k, v) = pair.split_once('=')?;
+                    Some((k.to_string(), v.trim_matches('"').to_string()))
+                })
+                .collect();
+            (name, labels)
+        }
+        None => (series, Vec::new()),
+    };
+    Some((name.to_string(), labels, value.parse().ok()?))
 }
 
 /// Polls stats until `peersCount == n`.

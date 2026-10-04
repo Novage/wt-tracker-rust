@@ -1641,6 +1641,7 @@ dependencies = [
  "foldhash",
  "futures-util",
  "httparse",
+ "log",
  "miniz_oxide",
  "papaya",
  "proptest",

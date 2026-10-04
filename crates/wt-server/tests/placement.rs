@@ -8,40 +8,34 @@ use std::time::Duration;
 
 use common::*;
 use futures_util::SinkExt;
-use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
 const WORKERS: usize = 4;
 
-fn hex(info_hash: &str) -> String {
-    info_hash.bytes().map(|b| format!("{b:02x}")).collect()
+/// The placement counters, from `/metrics` (all workers).
+async fn placement(server: &wt_server::Server, field: &str) -> u64 {
+    let m = metrics(server).await;
+    match field {
+        "movedConnections" => m.sum("wt_moved_connections_total", &[]),
+        "localRequests" => m.sum("wt_routed_requests_total", &[("target", "local")]),
+        "remoteRequests" => m.sum("wt_routed_requests_total", &[("target", "remote")]),
+        "directorySize" => m.sum("wt_directory_entries", &[]),
+        _ => panic!("unknown field {field}"),
+    }
 }
 
-/// Shards whose swarms include `info_hash`.
-fn shards_of(stats: &Value, info_hash: &str) -> Vec<usize> {
-    stats["peersCountPerInfoHashPerTracker"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .enumerate()
-        .filter(|(_, shard)| shard.get(hex(info_hash)).is_some())
-        .map(|(i, _)| i)
-        .collect()
-}
-
-fn placement(stats: &Value, field: &str) -> u64 {
-    stats["placement"][field].as_u64().unwrap()
+/// Workers whose shards hold `info_hash`.
+async fn shards_of(server: &wt_server::Server, info_hash: &str) -> Vec<usize> {
+    swarm_workers(server, info_hash).await
 }
 
 /// Exactly one shard holds `info_hash`; returns it.
-fn one_shard(stats: &Value, info_hash: &str) -> usize {
-    let shards = shards_of(stats, info_hash);
-    assert_eq!(shards.len(), 1, "{info_hash} on shards {shards:?}: {stats}");
+async fn one_shard(server: &wt_server::Server, info_hash: &str) -> usize {
+    let shards = shards_of(server, info_hash).await;
+    assert_eq!(shards.len(), 1, "{info_hash} on shards {shards:?}");
     shards[0]
 }
 
-/// Idle connections pinned to their accepting workers (their first message is not an
-/// announce). New content is placed on workers with fewer connections, so with these open,
 /// connections move whatever worker accepts them (even if one worker accepts all).
 async fn crowd(server: &wt_server::Server) -> Vec<Ws> {
     let mut conns = Vec::new();
@@ -73,12 +67,11 @@ async fn new_content_leaves_a_crowded_worker_and_its_viewers_follow() {
         }
     }
     drop(crowd);
-    let stats = stats(&server).await;
     for k in 0..10 {
-        one_shard(&stats, &format!("hnew{k:016}"));
+        one_shard(&server, &format!("hnew{k:016}")).await;
     }
-    assert!(placement(&stats, "movedConnections") > 0, "{stats}");
-    assert_eq!(placement(&stats, "remoteRequests"), 0, "{stats}");
+    assert!(placement(&server, "movedConnections").await > 0);
+    assert_eq!(placement(&server, "remoteRequests").await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -97,15 +90,13 @@ async fn one_swarm_stays_on_one_shard_and_every_request_is_local() {
         send(ws, &announce(H, &format!("p{i}"), 0)).await;
         assert_eq!(recv(ws).await.unwrap(), reply(H, 0, 30));
     }
-    let stats = stats(&server).await;
-    one_shard(&stats, H);
-    assert_eq!(stats["placement"]["mode"], "content");
-    assert_eq!(placement(&stats, "remoteRequests"), 0, "{stats}");
-    assert_eq!(placement(&stats, "localRequests"), 60, "{stats}");
-    assert_eq!(placement(&stats, "directorySize"), 1);
+    one_shard(&server, H).await;
+    assert_eq!(placement(&server, "remoteRequests").await, 0);
+    assert_eq!(placement(&server, "localRequests").await, 60);
+    assert_eq!(placement(&server, "directorySize").await, 1);
     eprintln!(
         "moved {} of 30 connections",
-        placement(&stats, "movedConnections")
+        placement(&server, "movedConnections").await
     );
 }
 
@@ -146,9 +137,8 @@ async fn video_and_audio_of_one_connection_share_a_shard() {
     assert!(answered, "nobody got the offer");
     assert!(recv(&mut b).await.unwrap().contains(r#""answer":"#));
 
-    let stats = stats(&server).await;
-    assert_eq!(one_shard(&stats, V), one_shard(&stats, A), "{stats}");
-    assert_eq!(placement(&stats, "remoteRequests"), 0, "{stats}");
+    assert_eq!(one_shard(&server, V).await, one_shard(&server, A).await);
+    assert_eq!(placement(&server, "remoteRequests").await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -167,7 +157,7 @@ async fn a_quality_switch_lands_on_the_same_shard() {
         }
         conns.push(ws);
     }
-    let before = one_shard(&stats(&server).await, Q1);
+    let before = one_shard(&server, Q1).await;
     for (i, ws) in conns.iter_mut().enumerate() {
         let peer = format!("p{i}");
         send(ws, &announce(Q2, &peer, 0)).await;
@@ -181,11 +171,10 @@ async fn a_quality_switch_lands_on_the_same_shard() {
         .await;
     }
     wait_peers(&server, 20).await;
-    let stats = stats(&server).await;
-    assert!(shards_of(&stats, Q1).is_empty(), "{stats}");
-    assert_eq!(one_shard(&stats, Q2), before);
-    assert_eq!(one_shard(&stats, A), before);
-    assert_eq!(placement(&stats, "remoteRequests"), 0, "{stats}");
+    assert!(shards_of(&server, Q1).await.is_empty());
+    assert_eq!(one_shard(&server, Q2).await, before);
+    assert_eq!(one_shard(&server, A).await, before);
+    assert_eq!(placement(&server, "remoteRequests").await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -210,9 +199,8 @@ async fn a_connection_whose_first_message_is_not_an_announce_stays_and_forwards(
         assert_eq!(recv(&mut ws).await.unwrap(), reply(H, 0, i + 2));
         pinned.push(ws);
     }
-    let stats = stats(&server).await;
-    one_shard(&stats, H);
-    assert_eq!(placement(&stats, "movedConnections"), 0, "{stats}");
+    one_shard(&server, H).await;
+    assert_eq!(placement(&server, "movedConnections").await, 0);
 }
 
 /// Frames sent together with the first announce (a ping before it, more messages after it)
@@ -250,10 +238,9 @@ async fn input_after_the_first_announce_moves_with_the_connection() {
         raws.push(raw);
     }
     drop(crowd);
-    let stats = stats(&server).await;
-    assert_eq!(one_shard(&stats, H), one_shard(&stats, A));
-    assert_eq!(placement(&stats, "remoteRequests"), 0, "{stats}");
-    assert!(placement(&stats, "movedConnections") > 0, "{stats}");
+    assert_eq!(one_shard(&server, H).await, one_shard(&server, A).await);
+    assert_eq!(placement(&server, "remoteRequests").await, 0);
+    assert!(placement(&server, "movedConnections").await > 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -322,9 +309,8 @@ async fn moving_wss_connections_keep_their_tls_session() {
         assert!(recv(ws).await.unwrap().contains(&sdp));
     }
     drop(crowd);
-    let stats = stats(&server).await;
-    assert_eq!(placement(&stats, "remoteRequests"), 0, "{stats}");
-    assert!(placement(&stats, "movedConnections") > 0, "{stats}");
+    assert_eq!(placement(&server, "remoteRequests").await, 0);
+    assert!(placement(&server, "movedConnections").await > 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -347,9 +333,8 @@ async fn concurrent_first_announces_of_new_content_bind_one_shard() {
         conns.push(task.await.unwrap());
     }
     wait_peers(&server, 50).await;
-    let stats = stats(&server).await;
-    one_shard(&stats, H);
-    assert_eq!(placement(&stats, "directorySize"), 1);
+    one_shard(&server, H).await;
+    assert_eq!(placement(&server, "directorySize").await, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -364,12 +349,12 @@ async fn empty_swarms_release_their_binding() {
         let mut ws = connect(&server).await;
         send(&mut ws, &announce(H, "p", 0)).await;
         assert!(recv(&mut ws).await.unwrap().contains(r#""incomplete":1"#));
-        assert_eq!(placement(&stats(&server).await, "directorySize"), 1);
+        assert_eq!(placement(&server, "directorySize").await, 1);
         send(&mut ws, &stop).await;
         wait_peers(&server, 0).await;
         // The expiry tick (every announceInterval) releases the empty binding.
         let deadline = tokio::time::Instant::now() + WAIT;
-        while placement(&stats(&server).await, "directorySize") != 0 {
+        while placement(&server, "directorySize").await != 0 {
             assert!(tokio::time::Instant::now() < deadline, "round {round}");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

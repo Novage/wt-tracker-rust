@@ -363,17 +363,17 @@ async fn a_moved_connection_keeps_compression() {
         clients
     })
     .await;
-    let stats = stats(&server).await;
-    assert!(
-        stats["placement"]["movedConnections"].as_u64().unwrap() > 0,
-        "{stats}"
+    let m = metrics(&server).await;
+    assert!(m.sum("wt_moved_connections_total", &[]) > 0);
+    assert_eq!(
+        m.sum("wt_routed_requests_total", &[("target", "remote")]),
+        0
     );
-    assert_eq!(stats["placement"]["remoteRequests"], 0, "{stats}");
     drop((clients, crowd));
 }
 
 /// Default `compressOutgoingMinSize` (1024): offers are compressed, short replies are not;
-/// `/stats.json` `traffic` counts what was sent, received, compressed and inflated.
+/// `/metrics` counts what was sent, received, compressed and inflated.
 #[tokio::test(flavor = "multi_thread")]
 async fn default_compresses_large_outgoing_messages_and_stats_count_traffic() {
     let server = server("");
@@ -394,33 +394,28 @@ async fn default_compresses_large_outgoing_messages_and_stats_count_traffic() {
         (a, b)
     })
     .await;
-    let stats = stats(&server).await;
-    let t = &stats["traffic"];
-    let n = |v: &serde_json::Value| v.as_u64().unwrap();
-    assert_eq!(n(&t["received"]["announces"]["messages"]), 2, "{t}");
-    assert_eq!(n(&t["sent"]["announceReplies"]["messages"]), 2, "{t}");
-    assert_eq!(n(&t["sent"]["offers"]["messages"]), 1, "{t}");
-    assert!(n(&t["sent"]["offers"]["bytes"]) >= 1024, "{t}");
-    let deflated = &t["compression"]["deflated"];
-    assert_eq!(n(&deflated["messages"]), 1, "{t}");
+    let m = metrics(&server).await;
+    let sum = |name: &str, filters: &[(&str, &str)]| m.sum(name, filters);
     assert_eq!(
-        n(&deflated["bytesBefore"]),
-        n(&t["sent"]["offers"]["bytes"]),
-        "{t}"
+        sum("wt_received_messages_total", &[("kind", "announce")]),
+        2
     );
-    assert!(
-        n(&deflated["bytesAfter"]) < n(&deflated["bytesBefore"]) / 4,
-        "{t}"
-    );
-    let inflated = &t["compression"]["inflated"];
-    assert_eq!(n(&inflated["messages"]), 2, "{t}");
     assert_eq!(
-        n(&inflated["bytesAfter"]),
-        n(&t["received"]["announces"]["bytes"]),
-        "{t}"
+        sum("wt_sent_messages_total", &[("kind", "announce_reply")]),
+        2
     );
-    assert!(
-        n(&t["socketBytes"]["in"]) > 0 && n(&t["socketBytes"]["out"]) > 0,
-        "{t}"
+    assert_eq!(sum("wt_sent_messages_total", &[("kind", "offer")]), 1);
+    let offer_bytes = sum("wt_sent_bytes_total", &[("kind", "offer")]);
+    assert!(offer_bytes >= 1024);
+    assert_eq!(sum("wt_deflate_messages_total", &[]), 1);
+    let deflated_before = sum("wt_deflate_bytes_total", &[("stage", "before")]);
+    assert_eq!(deflated_before, offer_bytes);
+    assert!(sum("wt_deflate_bytes_total", &[("stage", "after")]) < deflated_before / 4);
+    assert_eq!(sum("wt_inflate_messages_total", &[]), 2);
+    assert_eq!(
+        sum("wt_inflate_bytes_total", &[("stage", "after")]),
+        sum("wt_received_bytes_total", &[("kind", "announce")])
     );
+    assert!(sum("wt_socket_bytes_total", &[("direction", "in")]) > 0);
+    assert!(sum("wt_socket_bytes_total", &[("direction", "out")]) > 0);
 }

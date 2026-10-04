@@ -1,9 +1,10 @@
 //! Fuzz targets (`fuzz/`, spec §9): bytes from the network through the WebSocket codec,
-//! permessage-deflate and the HTTP upgrade. Each target must never panic for any input; the
+//! permessage-deflate, the HTTP upgrade and the `/stats.json` query. Each target must never panic for any input; the
 //! assertions check invariants that hold for every input. Also run by `cargo test` over the seed
 //! corpus and mutations of it.
 
 use crate::http;
+use crate::stats;
 use crate::ws::codec::{self, Data, Fragments, OpCode, Parsed};
 use crate::ws::deflate;
 
@@ -108,6 +109,16 @@ pub fn http_upgrade(data: &[u8]) {
         }
         let _ = http::path_matches(&head.path, &head.path);
         let _ = http::path_matches("/announce/*", &head.path);
+        // `/stats.json?infoHash=<hex>`: one key byte per hex pair, two for pairs >= 0x80.
+        if let Some((_, query)) = head.path.split_once('?')
+            && let Some(hex) = stats::query_param(query, "infoHash")
+            && let Some(key) = stats::info_hash_from_hex(hex)
+        {
+            assert!(
+                key.len() >= hex.len() / 2 && key.len() <= hex.len(),
+                "{hex}"
+            );
+        }
     }
     if let Ok(header) = std::str::from_utf8(data)
         && let Some((negotiated, response)) = deflate::negotiate(header)

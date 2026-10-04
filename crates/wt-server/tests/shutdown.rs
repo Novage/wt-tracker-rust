@@ -84,17 +84,22 @@ async fn sigterm_shuts_the_binary_down_gracefully() {
     .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_wt-tracker"))
         .arg(&config)
-        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    // Log lines (logfmt on stderr): `... level=info event=listening addr=127.0.0.1:PORT`.
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
     let mut line = String::new();
-    stdout.read_line(&mut line).unwrap();
-    let addr = line
-        .trim()
-        .strip_prefix("listening ")
-        .expect(&line)
-        .to_string();
+    let addr = loop {
+        line.clear();
+        assert!(
+            stderr.read_line(&mut line).unwrap() > 0,
+            "no listening line"
+        );
+        if line.contains(" event=listening ") {
+            break line.trim().rsplit_once("addr=").expect(&line).1.to_string();
+        }
+    };
 
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
         .await
@@ -109,9 +114,18 @@ async fn sigterm_shuts_the_binary_down_gracefully() {
         .unwrap();
     assert!(status.success());
     assert_eq!(close_code(&mut ws).await, Some(CloseCode::Away));
-    let exit = tokio::task::spawn_blocking(move || child.wait().unwrap())
-        .await
-        .unwrap();
+    let exit = tokio::task::spawn_blocking(move || {
+        // The rest of the log, so the child never blocks on a full pipe.
+        let rest: Vec<String> = stderr.lines().map_while(Result::ok).collect();
+        (child.wait().unwrap(), rest)
+    })
+    .await
+    .unwrap();
+    let (exit, rest) = exit;
+    assert!(
+        rest.iter().any(|l| l.contains(" event=stopped")),
+        "{rest:?}"
+    );
     assert!(exit.success(), "{exit:?}");
     assert!(
         started.elapsed() < Duration::from_secs(3),

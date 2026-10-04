@@ -5,7 +5,9 @@ A multi-core [WebTorrent](https://webtorrent.io/) tracker in Rust: a port of
 [p2p-media-loader](https://github.com/Novage/p2p-media-loader) and other WebTorrent clients.
 
 - **Drop-in for the JS tracker:** same `config.json` format, same wire protocol (replies are
-  byte-identical to the JS tracker's, checked by a differential test), same `/stats.json` shape.
+  byte-identical to the JS tracker's, checked by a differential test).
+- **Observable:** Prometheus `/metrics` on a private listener (traffic, compression, closes by
+  reason, rejected messages by reason, per worker) and logfmt logs on stderr.
 - **Multi-core without cross-thread traffic:** one tracker shard per core. The swarms of one piece
   of content (video, audio, every quality) share a shard, and a connection moves to that shard at
   its first announce, so its requests are handled on one core.
@@ -85,6 +87,8 @@ Settings this server adds (all optional):
 | `maxBackpressure` | 1 MiB | queued outgoing bytes per connection before messages to it are dropped |
 | `indexHtml` | `./index.html` if present | page served at `GET /` |
 | `shutdownTimeout` | `5` | seconds to wait for connections to close on SIGTERM / SIGINT |
+| `logLevel` | `info` | `error`, `warn`, `info` or `debug` (every connection close with its reason) |
+| `metrics` | off | `{"host": "127.0.0.1", "port": 9100}`: private plain HTTP listener for Prometheus `GET /metrics` and `GET /swarms` |
 | `websockets.compressOutgoingMinSize` | `1024` | with permessage-deflate, compress outgoing messages at least this long (0 = never, like the JS tracker) |
 | `tracker.offerSelection` | `sample` | how offers pick peers: `sample`, `window` or `round_robin` |
 
@@ -92,8 +96,14 @@ Every setting and its exact behaviour: [spec §13.1](docs/SPEC.md#131-configurat
 Deliberate differences from the JS tracker: [spec §8](docs/SPEC.md#8-differences-from-the-js-fasttracker).
 
 HTTP routes: the WebSocket upgrade on `websockets.path`, `GET /stats.json` (torrents, peers,
-connections, memory, placement counters, messages and bytes sent / received per kind, socket and
-compression bytes) and `GET /`.
+connections per listener, memory, workers, uptime; `?infoHash=<hex>` for one swarm) and `GET /`.
+With `metrics` set, `GET /metrics` on that listener: Prometheus metrics per worker (messages and
+bytes sent / received per kind, rejected messages and closed connections by reason, socket and
+compression bytes, placement counters), and `GET /swarms?top=100`: the largest swarms with
+their hex info_hash, peers and worker ([spec §13.7](docs/SPEC.md#137-metrics-and-swarms)).
+
+Logs: one logfmt line per event on stderr, e.g. `level=info event=listening addr=0.0.0.0:443`
+(no timestamp under systemd / journald; [spec §13.8](docs/SPEC.md#138-logging)).
 
 ## Repository
 

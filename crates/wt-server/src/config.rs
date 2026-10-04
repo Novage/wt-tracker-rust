@@ -35,6 +35,20 @@ pub struct Config {
     /// connections move to them, spec §13.3) or `hash` (`foldhash(info_hash) % workers`).
     #[serde(default)]
     pub placement: Option<String>,
+    /// `error`, `warn`, `info` (default) or `debug` (spec §13.8).
+    #[serde(default)]
+    pub log_level: Option<String>,
+    /// Prometheus `/metrics` on a separate plain HTTP listener; off when absent (spec §13.7).
+    #[serde(default)]
+    pub metrics: Option<MetricsConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetricsConfig {
+    #[serde(default = "default_metrics_host")]
+    pub host: String,
+    #[serde(default = "default_metrics_port")]
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -111,6 +125,12 @@ pub struct AccessConfig {
 
 fn default_servers() -> Vec<ServerItem> {
     vec![ServerItem::default()]
+}
+fn default_metrics_host() -> String {
+    "127.0.0.1".into()
+}
+fn default_metrics_port() -> u16 {
+    9100
 }
 fn default_shutdown_timeout() -> u64 {
     5
@@ -199,7 +219,16 @@ impl Config {
         }
         self.tracker_settings()?;
         self.placement_mode()?;
+        self.log_level()?;
         Ok(())
+    }
+
+    pub fn log_level(&self) -> Result<crate::logging::Level, String> {
+        match self.log_level.as_deref() {
+            None => Ok(crate::logging::Level::Info),
+            Some(name) => crate::logging::Level::parse(name)
+                .ok_or_else(|| format!("unknown logLevel '{name}'")),
+        }
     }
 
     pub fn placement_mode(&self) -> Result<crate::placement::Mode, String> {
