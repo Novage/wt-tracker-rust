@@ -43,6 +43,10 @@ All notable changes to this project are listed here. The format follows
 - First production run at tracker.novage.com.ua (Oracle Ampere A1, 2 cores, real peers): 4× less
   CPU and 3× less memory than aquatic_ws on the same host and load.
 
+- TLS session resumption with stateless session tickets: reconnecting clients skip the
+  certificate exchange (~3.5 KB less egress per reconnect; ~25% of production egress was
+  handshakes).
+
 ### Changed
 
 - `compressOutgoingMinSize` now defaults to 1024: outgoing messages of at least 1 KiB (offers)

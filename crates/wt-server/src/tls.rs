@@ -7,7 +7,7 @@ use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-/// rustls server config from PEM files (shared by the tokio-rustls and native transports).
+/// rustls server config from PEM files.
 pub fn server_config(cert_file: &Path, key_file: &Path) -> Result<Arc<ServerConfig>, String> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_file)
         .and_then(|certs| certs.collect())
@@ -25,5 +25,11 @@ pub fn server_config(cert_file: &Path, key_file: &Path) -> Result<Arc<ServerConf
             .with_single_cert(certs, key)
             .map_err(|e| format!("TLS certificate/key: {e}"))?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // Session resumption with stateless tickets (spec §13.2): a reconnecting client resumes its
+    // session without the certificate exchange (~3.5 KB less egress per reconnect, no signature).
+    // Ticket keys rotate every 6 h; tickets work on every worker and need no server memory. One
+    // ticket per handshake: a client uses one per reconnect and gets a new one each time.
+    config.ticketer = rustls::crypto::ring::Ticketer::new().map_err(|e| e.to_string())?;
+    config.send_tls13_tickets = 1;
     Ok(Arc::new(config))
 }

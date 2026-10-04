@@ -177,3 +177,77 @@ async fn tls_request_in_the_same_flight_as_finished() {
     .unwrap();
     assert!(response.starts_with("HTTP/1.1 101"), "{response:?}");
 }
+
+/// TLS session resumption with stateless tickets: after one full handshake a client resumes
+/// (no certificate exchange) on whichever worker accepts it, even after more other clients than
+/// a server-side session cache would hold (rustls' default keeps 256; production sees ~120 new
+/// connections per second).
+#[tokio::test(flavor = "multi_thread")]
+async fn tls_reconnects_resume_the_session() {
+    use rustls::HandshakeKind;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let dir = std::env::temp_dir().join(format!("wt-native-resume-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert_file, key_file) = (dir.join("cert.pem"), dir.join("key.pem"));
+    std::fs::write(&cert_file, cert.cert.pem()).unwrap();
+    std::fs::write(&key_file, cert.signing_key.serialize_pem()).unwrap();
+    let server = start(&format!(
+        r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{}}}}}],"workers":2}}"#,
+        serde_json::to_string(&cert_file).unwrap(),
+        serde_json::to_string(&key_file).unwrap()
+    ));
+    let addr = server.local_addrs()[0];
+    let der = cert.cert.der().clone();
+
+    let (first, others, again) = tokio::task::spawn_blocking(move || {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der).unwrap();
+        // A client config keeps the tickets it received: one per simulated browser.
+        let client = || {
+            Arc::new(
+                rustls::ClientConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots.clone())
+                .with_no_client_auth(),
+            )
+        };
+        let connect = |config: &Arc<rustls::ClientConfig>| {
+            let conn =
+                rustls::ClientConnection::new(config.clone(), "localhost".try_into().unwrap())
+                    .unwrap();
+            let tcp = std::net::TcpStream::connect(addr).unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut tls = rustls::StreamOwned::new(conn, tcp);
+            tls.write_all(HANDSHAKE.as_bytes()).unwrap();
+            // Reading the 101 response also processes the ticket sent after the handshake.
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                tls.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            assert!(head.starts_with(b"HTTP/1.1 101"));
+            tls.conn.handshake_kind().unwrap()
+        };
+        let a = client();
+        let first = connect(&a);
+        // More full handshakes of other clients than a 256-entry session cache holds.
+        let others: Vec<_> = (0..300).map(|_| connect(&client())).collect();
+        let again: Vec<_> = (0..5).map(|_| connect(&a)).collect();
+        (first, others, again)
+    })
+    .await
+    .unwrap();
+    assert_eq!(first, HandshakeKind::Full);
+    assert!(others.iter().all(|k| *k == HandshakeKind::Full));
+    assert!(
+        again.iter().all(|k| *k == HandshakeKind::Resumed),
+        "{again:?}"
+    );
+}

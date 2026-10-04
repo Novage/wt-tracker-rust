@@ -418,7 +418,9 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   65535/65536 boundaries) as masked, randomly fragmented frames with pings in between, fed in
   random chunks, must decode to the same messages. `tests/native.rs`: a frame written one byte
   at a time, 200 frames in one write, a 60 KB message over TLS records, the client's Finished and
-  HTTP request in one TLS flight.
+  HTTP request in one TLS flight, and session resumption: after one full handshake a client
+  resumes on every reconnect, even after 300 other clients' full handshakes (more than rustls'
+  default 256-entry session cache holds, which alone would force a full handshake again).
 - **Autobahn testsuite** (`loadtest/autobahn.sh`, docker image `crossbario/autobahn-testsuite`,
   fuzzing client against the `ws-echo` example over ws and wss, including the permessage-deflate
   cases 12.* / 13.*; the echo server negotiates compression and compresses every reply): no case
@@ -673,6 +675,12 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
     between Rust and aquatic took 4–5.5 min each way: orphaned connections of the stopped
     listener (FIN-WAIT, LAST-ACK) keep its socket options, and a listener without
     `SO_REUSEADDR` (aquatic), or one of another user, cannot bind the port until they drain.
+- **TLS handshakes in production egress (2026-10-04, noon, ~42k peers):** ~120 new
+  connections / s (a connection lasts ~6 min on average), each full handshake sending ~3.7 KB
+  (certificate chain): ~0.45 of 1.79 MB/s interface egress (~25%). rustls' default 256-entry
+  session cache covered ~2 s of handshakes, so reconnects rarely resumed; stateless session
+  tickets (§13.2) now let them resume. Expected: up to ~20% less egress if browsers resume;
+  to be measured in production.
 - **Placement, open (research):** creation-time balance cannot foresee popularity — a piece of
   content that outgrows one core stays on it (only its new hashes spill); fixing that needs
   moving live swarms or connections. Swarm-creation races in a mass reconnect (after a restart)
@@ -710,7 +718,7 @@ defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-
 | Field | Default | Notes |
 |---|---|---|
 | `servers[].server.host` / `.port` | `0.0.0.0` / `8000` | one listener per item; port 0 = any (`Server::local_addrs`) |
-| `servers[].server.key_file_name` + `cert_file_name` | — | PEM; both set → wss:// (rustls, ring, TLS 1.2 + 1.3, ALPN `http/1.1`) |
+| `servers[].server.key_file_name` + `cert_file_name` | — | PEM; both set → wss:// (rustls, ring, TLS 1.2 + 1.3, ALPN `http/1.1`, session tickets) |
 | `servers[].server.passphrase`, `dh_params_file_name`, `ca_file_name`, `ssl_ciphers`, `ssl_prefer_low_memory_usage` | — | accepted, **ignored with a startup warning** |
 | `servers[].websockets.path` | `/*` | `/*` any path, `/a/*` prefix, else exact (query ignored) |
 | `servers[].websockets.maxPayloadLength` | 65536 | larger message → close |
@@ -751,6 +759,11 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
   - **TLS** (wss) uses rustls' unbuffered API on the same shared buffers (TLS ciphertext in, a
     shared plaintext / ciphertext scratch out); a connection keeps an incomplete TLS record and
     unsent ciphertext only while they exist. The HTTP request head is read through it.
+    **Session resumption:** stateless session tickets (rustls `Ticketer`: AEAD ticket keys
+    rotated every 6 h, shared by all workers, no server-side session state; one ticket per
+    handshake, `send_tls13_tickets = 1`). A reconnecting client resumes without the certificate
+    exchange (~3.5 KB less sent per reconnect with a Let's Encrypt ECDSA chain, no signature).
+    Tickets do not survive a restart (new keys).
   - **Writes:** queued messages are sent with one vectored write per wake-up (frame headers +
     the shared encoder slices, no copy); TLS encrypts up to 64 KiB of frames per batch.
   - Text and binary messages are both parsed (§7); fragmented messages are reassembled.
