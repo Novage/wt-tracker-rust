@@ -125,7 +125,7 @@ async fn reload_on_hangup(server: &wt_server::Server, hangup: Hangup) {
                 _ = &mut stop => return,
                 _ = hangup.recv() => {
                     event!(Info, "reload_requested", signal = "SIGHUP");
-                    server.reload_tls();
+                    server.request_tls_reload();
                 }
             }
         }

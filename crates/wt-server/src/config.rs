@@ -130,6 +130,9 @@ pub struct AccessConfig {
 fn default_servers() -> Vec<ServerItem> {
     vec![ServerItem::default()]
 }
+/// One day: a longer check interval is surely meant as "off" (0).
+pub const MAX_TLS_RELOAD_INTERVAL: u64 = 86_400;
+
 fn default_tls_reload_interval() -> u64 {
     60
 }
@@ -227,6 +230,11 @@ impl Config {
         self.tracker_settings()?;
         self.placement_mode()?;
         self.log_level()?;
+        if self.tls_reload_interval > MAX_TLS_RELOAD_INTERVAL {
+            return Err(format!(
+                "'tlsReloadInterval' must be at most {MAX_TLS_RELOAD_INTERVAL} seconds (0 = off)"
+            ));
+        }
         Ok(())
     }
 
@@ -296,5 +304,20 @@ impl Config {
             }
         }
         warnings
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_reload_interval_is_at_most_a_day() {
+        assert_eq!(Config::from_json("{}").unwrap().tls_reload_interval, 60);
+        assert!(Config::from_json(r#"{"tlsReloadInterval":0}"#).is_ok());
+        assert!(Config::from_json(r#"{"tlsReloadInterval":86400}"#).is_ok());
+        // Not "never" (that is 0): it would overflow the next check's time.
+        let e = Config::from_json(r#"{"tlsReloadInterval":18446744073709551615}"#).unwrap_err();
+        assert!(e.contains("tlsReloadInterval"), "{e}");
     }
 }

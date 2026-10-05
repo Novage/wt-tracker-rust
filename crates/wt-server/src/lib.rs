@@ -120,6 +120,14 @@ impl Server {
             .unwrap_or_default()
     }
 
+    /// Like [`Self::reload_tls`] without waiting: the reload thread logs the results (SIGHUP,
+    /// so a slow file system cannot hold up the handling of other signals).
+    pub fn request_tls_reload(&self) {
+        if let Some(tls) = &self.tls {
+            tls.request();
+        }
+    }
+
     pub fn shutdown(self) {}
 
     /// Stops accepting connections, closes every WebSocket with 1001 (Going Away) after the

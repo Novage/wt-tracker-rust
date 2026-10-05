@@ -67,6 +67,22 @@ async fn a_zero_timeout_stops_without_waiting() {
     drop(raw);
 }
 
+/// Kills the child `wt-tracker` if the test panics: a server left running keeps the test's
+/// output pipes open, and the test run hangs instead of failing.
+#[cfg(unix)]
+struct KillOnPanic(u32);
+
+#[cfg(unix)]
+impl Drop for KillOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &self.0.to_string()])
+                .status();
+        }
+    }
+}
+
 /// Sends `signal` (e.g. `TERM`) to process `pid`.
 #[cfg(unix)]
 fn kill(signal: &str, pid: u32) {
@@ -97,6 +113,7 @@ async fn sigterm_shuts_the_binary_down_gracefully() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let _kill_on_panic = KillOnPanic(child.id());
     // Log lines (logfmt on stderr): `... level=info event=listening addr=127.0.0.1:PORT`.
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
     let mut line = String::new();
@@ -156,7 +173,14 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
         std::fs::write(&cert_file, cert.cert.pem()).unwrap();
         std::fs::write(&key_file, cert.signing_key.serialize_pem()).unwrap();
     };
-    write(&rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap());
+    let (a, b) = (
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap(),
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap(),
+    );
+    write(&a);
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(a.cert.der().clone()).unwrap();
+    roots.add(b.cert.der().clone()).unwrap();
     let config = dir.join("config.json");
     std::fs::write(
         &config,
@@ -172,6 +196,7 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let _kill_on_panic = KillOnPanic(child.id());
     // Log lines from a reader thread.
     let (lines_tx, lines) = mpsc::channel::<String>();
     let stderr = BufReader::new(child.stderr.take().unwrap());
@@ -192,8 +217,17 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
             }
         }
     };
-    let line = next("listening");
-    let addr = line.rsplit_once("addr=").unwrap().1.to_string();
+    // One line per listener, in config order: plain ws://, then wss://.
+    let mut listening = (0..2).map(|_| {
+        let line = next("listening");
+        line.rsplit_once("addr=").unwrap().1.to_string()
+    });
+    let (addr, wss) = (listening.next().unwrap(), listening.next().unwrap());
+    let wss: std::net::SocketAddr = wss.parse().unwrap();
+    // The certificate the wss:// listener serves to a new client (a fresh client config: a
+    // resumed session would report the certificate of its first handshake).
+    let served = || tokio::task::block_in_place(|| tls_connect(wss, &tls_client(&roots)).1);
+    assert_eq!(served(), a.cert.der().to_vec());
 
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
         .await
@@ -201,10 +235,12 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
     send(&mut ws, &announce(H, "p1", 0)).await;
     assert_eq!(recv(&mut ws).await.unwrap(), reply(H, 0, 1));
 
-    write(&rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap());
+    write(&b);
     kill("HUP", child.id());
     let reloaded = tokio::task::block_in_place(|| next("tls_reloaded"));
     assert!(reloaded.contains("trigger=signal"), "{reloaded}");
+    // The listener really serves the new certificate.
+    assert_eq!(served(), b.cert.der().to_vec());
     kill("HUP", child.id());
     tokio::task::block_in_place(|| next("tls_unchanged"));
 
@@ -247,6 +283,7 @@ async fn sighup_during_startup_does_not_kill_the_process() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let _kill_on_panic = KillOnPanic(child.id());
     // Wait until the child opens the FIFO to read its configuration, which it does after
     // installing the SIGHUP handler: until then a non-blocking open for writing fails (ENXIO).
     // No fixed sleep, so a slow start (cold binary, loaded CI) cannot make the test fail.

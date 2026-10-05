@@ -223,48 +223,6 @@ async fn tls_reconnects_resume_the_session() {
     );
 }
 
-/// A blocking TLS client of the tests below: WebSocket upgrade done.
-type Tls = rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>;
-
-/// A client config trusting `roots`; it keeps the session tickets it receives.
-fn tls_client(roots: &rustls::RootCertStore) -> std::sync::Arc<rustls::ClientConfig> {
-    std::sync::Arc::new(
-        rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(roots.clone())
-        .with_no_client_auth(),
-    )
-}
-
-/// Connects with `config`; returns the stream, the leaf certificate the server sent (the
-/// original one on a resumed session) and the handshake kind.
-fn tls_connect(
-    addr: std::net::SocketAddr,
-    config: &std::sync::Arc<rustls::ClientConfig>,
-) -> (Tls, Vec<u8>, rustls::HandshakeKind) {
-    use std::io::{Read, Write};
-    let conn =
-        rustls::ClientConnection::new(config.clone(), "localhost".try_into().unwrap()).unwrap();
-    let tcp = std::net::TcpStream::connect(addr).unwrap();
-    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let mut tls = rustls::StreamOwned::new(conn, tcp);
-    tls.write_all(HANDSHAKE.as_bytes()).unwrap();
-    // Reading the 101 response also processes the ticket sent after the handshake.
-    let mut head = Vec::new();
-    let mut byte = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
-        tls.read_exact(&mut byte).unwrap();
-        head.push(byte[0]);
-    }
-    assert!(head.starts_with(b"HTTP/1.1 101"));
-    let leaf = tls.conn.peer_certificates().unwrap()[0].to_vec();
-    let kind = tls.conn.handshake_kind().unwrap();
-    (tls, leaf, kind)
-}
-
 /// Announces on an open TLS WebSocket and reads the reply.
 fn tls_announce(tls: &mut Tls, peer_id: &str) -> String {
     use std::io::{Read, Write};

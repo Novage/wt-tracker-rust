@@ -204,9 +204,10 @@ sudo systemd-analyze verify /etc/systemd/system/wt-tracker-rust.service
 
 ## 8. Renewal without a restart
 
-certbot runs deploy hooks after a successful renewal (`$RENEWED_LINEAGE` is the certificate's
-`live/` directory). This one copies the new files atomically and asks the tracker to reload
-them (SIGHUP through `ExecReload`); the tracker also notices changed files by itself within
+certbot runs deploy hooks after every successful renewal of **any** certificate on the host
+(`$RENEWED_LINEAGE` is the renewed certificate's `live/` directory). This one ignores the other
+certificates (copying another domain's certificate would make every wss client fail the
+hostname check), copies the new files atomically and asks the tracker to reload them (SIGHUP through `ExecReload`); the tracker also notices changed files by itself within
 `tlsReloadInterval` (60 s). A key that does not match its certificate is rejected and the old
 certificate kept.
 
@@ -216,7 +217,10 @@ sudo tee /etc/letsencrypt/renewal-hooks/deploy/wt-tracker-rust.sh > /dev/null <<
 # certbot deploy hook: copy the renewed certificate for wt-tracker-rust and reload it (no
 # restart: connections stay open).
 set -e
-src=${RENEWED_LINEAGE:-/etc/letsencrypt/live/tracker.example.com}
+lineage=/etc/letsencrypt/live/tracker.example.com
+# Deploy hooks run for every renewed certificate on the host: only the tracker's.
+[ "${RENEWED_LINEAGE:-$lineage}" = "$lineage" ] || exit 0
+src=$lineage
 dst=/etc/wt-tracker-rust/tls
 install -m 640 -g wt-tracker-tls "$src/privkey.pem" "$dst/.privkey.pem.new"
 install -m 644 "$src/fullchain.pem" "$dst/.fullchain.pem.new"
@@ -230,8 +234,7 @@ sudo chmod 755 /etc/letsencrypt/renewal-hooks/deploy/wt-tracker-rust.sh
 Copy the current certificate once and start the tracker:
 
 ```bash
-sudo RENEWED_LINEAGE=/etc/letsencrypt/live/tracker.example.com \
-  /etc/letsencrypt/renewal-hooks/deploy/wt-tracker-rust.sh
+sudo /etc/letsencrypt/renewal-hooks/deploy/wt-tracker-rust.sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now wt-tracker-rust.service
 ```

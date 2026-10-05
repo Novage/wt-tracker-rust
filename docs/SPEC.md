@@ -460,18 +460,24 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   they are closed, then connects are refused; a zero timeout returns at once with a client that
   never answers; the `wt-tracker` binary (Unix) closes with 1001, logs `event=stopped` and exits
   0 on SIGTERM (its address is read from the `event=listening` log line); on SIGHUP it logs
-  `tls_reloaded` (`trigger=signal`) after the certificate files changed and `tls_unchanged`
-  otherwise, keeps running and keeps its connections; a SIGHUP while it is blocked reading its
+  `tls_reloaded` (`trigger=signal`) after the certificate files changed, its wss:// listener
+  then serves the new certificate to a new client (a fresh client config: a resumed session
+  reports the first certificate), `tls_unchanged` otherwise, keeps running and keeps its
+  connections; a SIGHUP while it is blocked reading its
   configuration from a FIFO does not kill it and becomes a `reload_requested` after `started`
   (the test waits until the child has opened the FIFO, proven by a non-blocking open for
-  writing succeeding, and keeps it open so the child is still reading: no fixed delay).
+  writing succeeding, and keeps it open so the child is still reading: no fixed delay). A
+  panicking binary test kills its child (`KillOnPanic`), so a failure cannot hang the run.
 - TLS reload (`tests/native.rs`): `Server::reload_tls` swaps certificate A for B (new
   connections get B, a connection opened before keeps working, a ticket from A still resumes);
   B's key with a new certificate is rejected and B kept; the file watcher (`tlsReloadInterval:
   1`) picks up C by itself; `wt_tls_reloads_total` and `wt_tls_certificate_expiry_seconds`.
-  Unit tests (`tls.rs`): `notAfter` from UTCTime and GeneralizedTime, one attempt per file
-  change, the failure counters, `not_after` of the served certificate; `logging.rs`: civil
-  dates both ways.
+  Unit tests (`tls.rs`, `Watch::run`): `notAfter` from UTCTime and GeneralizedTime; a swap and
+  its counters; a half-replaced pair retried on the next check and not counted; files that
+  keep failing reported once (second check), read again on every check and picked up after a
+  fix in place that keeps their stamp (same length and modification time); a SIGHUP failure
+  reported at once and not again by the watcher. `config.rs`: `tlsReloadInterval` limit.
+  `logging.rs`: civil dates both ways.
 - `tests/observability.rs` (§13.7): `/swarms` (top 3 of 6 swarms over 4 shards by peers,
   `total`, `top=0` / default = all, `top=x` → 400, not on the public listener, its hex matching
   `?infoHash=`); connections counted by reason (`client_close`, `rejected`
@@ -772,7 +778,7 @@ defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-
 | `maxBackpressure` (new) | 1 MiB | per-connection queued bytes; further messages to it are dropped (`wt_dropped_messages_total`) |
 | `indexHtml` (new) | `./index.html` if present | served at `GET /` |
 | `shutdownTimeout` (new) | 5 | seconds a graceful shutdown waits for connections to close (§13.6) |
-| `tlsReloadInterval` (new) | 60 | seconds between checks of the certificate files of wss:// listeners; a change reloads them (§13.2); 0 = off (SIGHUP still reloads) |
+| `tlsReloadInterval` (new) | 60 | seconds between checks of the certificate files of wss:// listeners; a change reloads them (§13.2); 0 = off (SIGHUP still reloads); at most 86400, else a config error |
 | `logLevel` (new) | `info` | `error` / `warn` / `info` / `debug` (§13.8); unknown value → config error |
 | `metrics` (new) | — (off) | `{"host", "port"}` (defaults `127.0.0.1`, 9100): private plain HTTP listener for `GET /metrics` and `GET /swarms` (§13.7), accepted by worker 0; port 0 = any (`Server::metrics_addr`) |
 
@@ -810,15 +816,22 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
     its ticket keys stay and tickets issued before a reload still resume. A reload reads both
     PEM files again and swaps the served chain and key; `CertifiedKey::from_der` must accept the
     key and find it matching the leaf certificate (`keys_match`), else the previous certificate
-    stays (a half-replaced pair during a renewal, a bad file) and the attempt is counted and
-    logged. All reloads run on one thread, `wt-tls` (`tls::Reloader`, started only if a listener
-    has TLS; ends with the `Server`), off the workers, so file reads never stall connections
-    and newer files are always installed last. Triggers: SIGHUP (§13.6; `Server::reload_tls`
-    sends a request to `wt-tls` and waits for the results; always reads the files) and, every
-    `tlsReloadInterval` seconds (counted from the last check), a change of modification time or
-    length of either file (following symlinks; one attempt per change; a missing file waits for
-    the next check). Files holding the certificate already served → unchanged. Open
-    connections keep their session. `notAfter` of the leaf is read from its DER (`validity`, UTCTime or
+    stays (a half-replaced pair during a renewal, a bad file). All reloads run on one thread,
+    `wt-tls` (`tls::Reloader`, started only if a listener has TLS; ends with the `Server`),
+    off the workers, so file reads never stall connections and newer files are always
+    installed last; it alone keeps the watch state of each certificate (`tls::Watch`: the
+    files' stamp last loaded, and the stamp of files that failed). Triggers:
+    - SIGHUP (§13.6; `Server::request_tls_reload`, not waiting; `Server::reload_tls` waits for
+      the results): always reads the files; a failure is counted and logged at once.
+    - Every `tlsReloadInterval` seconds (counted from the last check): reads the files when
+      the modification time or length of either changed (following symlinks), and again on
+      every check after a failure (a read can catch a file mid-write, and the fixed file can
+      keep the stamp). A failure is counted and logged only when the same files fail on two
+      checks in a row, once, so a check between a renewal's replacement of the key and of the
+      certificate is not one. A missing file waits for the next check.
+    Files holding the certificate already served → unchanged. If the thread is gone (a panic),
+    a reload request logs `tls_reload_failed listener=*`. Open connections keep their
+    session. `notAfter` of the leaf is read from its DER (`validity`, UTCTime or
     GeneralizedTime) for the log and `/metrics`.
   - **Writes:** queued messages are sent with one vectored write per wake-up (frame headers +
     the shared encoder slices, no copy); TLS encrypts up to 64 KiB of frames per batch.
@@ -946,7 +959,8 @@ Malformed hex → `400 Bad Request`. The list of swarms is on the private listen
   (`Server::shutdown_gracefully(shutdownTimeout)`), a second one exits at once (exit code 1).
   After a graceful shutdown the exit code is 0.
 - SIGHUP (Unix, before a shutdown) reloads the certificates of every wss:// listener
-  (§13.2, `Server::reload_tls`) and the server keeps running (e.g. systemd
+  (§13.2, `Server::request_tls_reload`: handed to the reload thread without waiting, so a slow
+  file system cannot delay a following SIGTERM) and the server keeps running (e.g. systemd
   `ExecReload=/bin/kill -HUP $MAINPID`, run by a certbot deploy hook). Its handler is installed
   first thing in `main`, before the configuration is read: a SIGHUP during startup (whose default
   action would end the process, a clean exit for systemd's `Restart=on-failure`) is kept and
@@ -1012,7 +1026,7 @@ become `event=library target=… message=…`.
 
 | Level | Events |
 |---|---|
-| error | `config_read_failed`, `config_invalid`, `start_failed` (exit 1); `accept_failed` (*limited*, e.g. EMFILE; `listener`, `error`); `tls_reload_failed` (`listener`, `error`, `trigger`) |
+| error | `config_read_failed`, `config_invalid`, `start_failed` (exit 1); `accept_failed` (*limited*, e.g. EMFILE; `listener`, `error`); `tls_reload_failed` (`listener`, `error`, `trigger`; `listener=*` if the reload thread stopped) |
 | warn | `config_warning` (ignored JS options); `worker_not_responding` (*limited*); `stopped_without_waiting` (second signal) |
 | info | `listening` (`addr`, per listener), `metrics_listening`, `started` (`version`, `workers`, `placement`); `shutting_down`, `stopped`; `reload_requested` (SIGHUP), `tls_reloaded` (`listener`, `not_after` or `unknown`, `trigger` = `signal` / `file`), `tls_unchanged` (SIGHUP, same certificate); `rejected_message` (*limited*; `reason`, `error`, `worker`) |
 | debug | `connection_closed` (`reason` as in §13.7, `peer`, `duration_s`, `worker`) for every connection, upgraded or not; `upgrade_denied` (`reason`, `peer`); `tls_handshake_failed` (`peer`, `error`); `not_found` (`peer`, `path`) |
