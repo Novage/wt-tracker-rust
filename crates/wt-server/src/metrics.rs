@@ -376,21 +376,19 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
         &stats,
         |s| s.expired,
     );
-    if shared.listeners.iter().any(|l| l.cert.is_some()) {
+    if shared.certs().next().is_some() {
         t.family(
             "wt_tls_reloads_total",
             "counter",
             "Certificate reloads of wss:// listeners (SIGHUP or a file change), by result.",
         );
-        for l in &shared.listeners {
-            if let Some(cert) = &l.cert {
-                for (result, n) in [("ok", &cert.reloads_ok), ("error", &cert.reloads_failed)] {
-                    t.sample(
-                        "wt_tls_reloads_total",
-                        &[("listener", &l.name), ("result", &result)],
-                        n.load(Relaxed),
-                    );
-                }
+        for (name, cert) in shared.certs() {
+            for (result, n) in [("ok", &cert.reloads_ok), ("error", &cert.reloads_failed)] {
+                t.sample(
+                    "wt_tls_reloads_total",
+                    &[("listener", &name), ("result", &result)],
+                    n.load(Relaxed),
+                );
             }
         }
         t.family(
@@ -399,16 +397,13 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
             "notAfter of the certificate a wss:// listener serves, in Unix seconds.",
         );
         // No sample for a certificate whose notAfter could not be parsed: a 0 would look expired.
-        for l in &shared.listeners {
-            if let Some(cert) = &l.cert {
-                let not_after = cert.not_after.load(Relaxed);
-                if not_after != crate::tls::UNKNOWN {
-                    t.sample(
-                        "wt_tls_certificate_expiry_seconds",
-                        &[("listener", &l.name)],
-                        not_after,
-                    );
-                }
+        for (name, cert) in shared.certs() {
+            if let Some(not_after) = cert.not_after() {
+                t.sample(
+                    "wt_tls_certificate_expiry_seconds",
+                    &[("listener", &name)],
+                    not_after,
+                );
             }
         }
     }

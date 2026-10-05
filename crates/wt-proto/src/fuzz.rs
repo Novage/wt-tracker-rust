@@ -58,7 +58,9 @@ pub fn protocol(data: &[u8]) {
         assert_eq!(a, b, "owned path differs");
         for (to, message) in a {
             assert!(to.0 < 8, "message for unknown connection {to:?}");
-            if let Err(e) = serde_json::from_slice::<serde_json::Value>(&message) {
+            // `IgnoredAny`, not `Value`: with serde_json's `raw_value` feature a `Value` rejects
+            // the (valid) key "$serde_json::private::RawValue", which clients may send.
+            if let Err(e) = serde_json::from_slice::<serde::de::IgnoredAny>(&message) {
                 panic!("invalid JSON ({e}): {}", String::from_utf8_lossy(&message));
             }
         }
@@ -68,6 +70,19 @@ pub fn protocol(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CI fuzz crash (protocol, 2026-10-05): a scrape of the info_hash
+    /// `"$serde_json::private::RawValue"` gives a reply with that string as a key. The reply is
+    /// valid JSON, but serde_json reserves that key for `RawValue`, and the check parsed the
+    /// reply into a `Value`, which rejects it.
+    #[test]
+    fn a_reply_keyed_by_serde_jsons_reserved_name_is_valid_json() {
+        let mut input = vec![0, 5, 0x02];
+        input.extend_from_slice(
+            br#"{"action":"scrape","info_hash":["$serde_json::private::RawValue"]}"#,
+        );
+        protocol(&input);
+    }
 
     #[test]
     fn protocol_survives_the_corpus_and_mutations() {

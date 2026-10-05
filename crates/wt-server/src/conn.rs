@@ -63,8 +63,13 @@ async fn serve(me: Rc<Worker>, listener: usize, stream: TcpStream, peer: SocketA
     let _ = stream.set_nodelay(true);
     let info = &me.shared.listeners[listener];
     let mut io = match &info.tls {
-        Some(config) => {
-            match timeout(HANDSHAKE_TIMEOUT, Io::accept_tls(stream, config.clone())).await {
+        Some(tls) => {
+            match timeout(
+                HANDSHAKE_TIMEOUT,
+                Io::accept_tls(stream, tls.config.clone()),
+            )
+            .await
+            {
                 Ok(Ok(io)) => io,
                 failed => {
                     let error = match failed {

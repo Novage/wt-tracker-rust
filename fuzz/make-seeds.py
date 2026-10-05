@@ -116,4 +116,9 @@ write("protocol", "multi-swarm", bytes([1, 19]) + frames(
     b"\x04" + b"{ not json",
     b"\xe3",
 ))
+# CI crash 2026-10-05: an info_hash equal to serde_json's reserved RawValue key (valid JSON).
+write("protocol", "reserved-key", bytes([0, 5]) + frames(
+    b"\x01" + announce("$serde_json::private::RawValue", "pa", 1),
+    b"\x02" + json.dumps({"action": "scrape", "info_hash": ["$serde_json::private::RawValue"]}).encode(),
+))
 print("seeds written to", ROOT)

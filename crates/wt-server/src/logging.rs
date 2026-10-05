@@ -140,29 +140,29 @@ fn push_value(line: &mut String, value: &str) {
 /// RFC 3339 in UTC with milliseconds, e.g. `2026-10-04T12:56:42.123Z`.
 fn push_timestamp(line: &mut String, time: SystemTime) {
     let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = since.as_secs();
-    let (days, rest) = (secs / 86_400, secs % 86_400);
-    let (year, month, day) = civil_from_days(days as i64);
-    let _ = write!(
-        line,
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        rest / 3600,
-        rest / 60 % 60,
-        rest % 60,
-        since.subsec_millis()
-    );
+    push_datetime(line, since.as_secs() as i64);
+    let _ = write!(line, ".{:03}Z", since.subsec_millis());
 }
 
 /// Unix seconds as RFC 3339 UTC without fractions, e.g. `2027-01-01T00:00:00Z`.
 pub(crate) fn timestamp(unix: i64) -> String {
+    let mut line = String::new();
+    push_datetime(&mut line, unix);
+    line.push('Z');
+    line
+}
+
+/// `YYYY-MM-DDTHH:MM:SS` of Unix seconds, UTC.
+fn push_datetime(line: &mut String, unix: i64) {
     let (days, rest) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
     let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+    let _ = write!(
+        line,
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}",
         rest / 3600,
         rest / 60 % 60,
         rest % 60
-    )
+    );
 }
 
 /// (year, month, day) → days since 1970-01-01, the inverse of [`civil_from_days`].

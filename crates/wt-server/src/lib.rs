@@ -53,8 +53,15 @@ pub(crate) struct Shared {
     /// When the server started (uptime), and as seconds since the Unix epoch (`/metrics`).
     pub started: Instant,
     pub started_unix: u64,
-    /// Seconds between checks of the certificate files (0: off).
-    pub tls_reload_interval: u64,
+}
+
+impl Shared {
+    /// `(listener, certificate)` of every wss:// listener.
+    pub(crate) fn certs(&self) -> impl Iterator<Item = (&str, &Arc<tls::CertStore>)> {
+        self.listeners
+            .iter()
+            .filter_map(|l| Some((l.name.as_str(), &l.tls.as_ref()?.cert)))
+    }
 }
 
 pub(crate) struct ListenerInfo {
@@ -62,9 +69,7 @@ pub(crate) struct ListenerInfo {
     pub name: String,
     pub websockets: WebSocketsConfig,
     /// wss:// when set.
-    pub tls: Option<Arc<rustls::ServerConfig>>,
-    /// The certificate it serves, reloadable (wss:// only).
-    pub cert: Option<Arc<tls::CertStore>>,
+    pub tls: Option<tls::Tls>,
     /// Open WebSocket connections on this listener, all workers.
     pub web_sockets: AtomicUsize,
 }
@@ -84,8 +89,8 @@ pub(crate) enum Phase {
 pub struct Server {
     addrs: Vec<SocketAddr>,
     metrics_addr: Option<SocketAddr>,
-    /// `(listener, certificate)` of every wss:// listener.
-    certs: Vec<(String, Arc<tls::CertStore>)>,
+    /// Reloads the certificates (only with a wss:// listener).
+    tls: Option<tls::Reloader>,
     workers: usize,
     shutdown: watch::Sender<Phase>,
     threads: Vec<JoinHandle<()>>,
@@ -109,14 +114,10 @@ impl Server {
     /// Reloads the certificate of every wss:// listener from its files (SIGHUP) and logs the
     /// result; a listener whose files fail to load keeps its certificate.
     pub fn reload_tls(&self) -> Vec<(String, Reload)> {
-        self.certs
-            .iter()
-            .map(|(name, cert)| {
-                let result = cert.reload(true);
-                tls::log(name, &result, "signal");
-                (name.clone(), result)
-            })
-            .collect()
+        self.tls
+            .as_ref()
+            .map(tls::Reloader::reload)
+            .unwrap_or_default()
     }
 
     pub fn shutdown(self) {}
@@ -182,18 +183,16 @@ pub fn start(config: Config) -> Result<Server, String> {
                 per_worker.push(Some(bind(local, true).map_err(|e| format!("{name}: {e}"))?));
             }
         }
-        let cert = match (&s.cert_file_name, &s.key_file_name) {
-            (Some(cert), Some(key)) => Some(tls::CertStore::open(cert, key)?),
+        let tls = match (&s.cert_file_name, &s.key_file_name) {
+            (Some(cert), Some(key)) => Some(tls::Tls::open(cert, key)?),
             _ => None,
         };
-        let tls = cert.clone().map(tls::server_config).transpose()?;
         addrs.push(local);
         sockets.push(per_worker);
         listeners.push(ListenerInfo {
             name,
             websockets: item.websockets.clone(),
             tls,
-            cert,
             web_sockets: AtomicUsize::new(0),
         });
     }
@@ -247,13 +246,17 @@ pub fn start(config: Config) -> Result<Server, String> {
         started_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
-        tls_reload_interval: config.tls_reload_interval,
     });
-    let certs = shared
-        .listeners
-        .iter()
-        .filter_map(|l| Some((l.name.clone(), l.cert.clone()?)))
+    let certs: Vec<_> = shared
+        .certs()
+        .map(|(name, cert)| (name.to_owned(), cert.clone()))
         .collect();
+    let tls = if certs.is_empty() {
+        None
+    } else {
+        let interval = Duration::from_secs(config.tls_reload_interval);
+        Some(tls::Reloader::spawn(certs, interval).map_err(|e| e.to_string())?)
+    };
 
     let (shutdown, shutdown_rx) = watch::channel(Phase::Running);
     let mut threads = Vec::new();
@@ -285,7 +288,7 @@ pub fn start(config: Config) -> Result<Server, String> {
     Ok(Server {
         addrs,
         metrics_addr,
-        certs,
+        tls,
         workers,
         shutdown,
         threads,

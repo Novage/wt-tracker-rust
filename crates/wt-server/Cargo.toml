@@ -35,6 +35,8 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 [dev-dependencies]
 futures-util = "0.3"
+# O_NONBLOCK / ENXIO for the FIFO in tests/shutdown.rs.
+libc = "0.2"
 miniz_oxide = "0.9.1"
 proptest = "1.11"
 rcgen = "0.14"

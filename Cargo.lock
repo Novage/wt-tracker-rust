@@ -1641,6 +1641,7 @@ dependencies = [
  "foldhash",
  "futures-util",
  "httparse",
+ "libc",
  "log",
  "miniz_oxide",
  "papaya",

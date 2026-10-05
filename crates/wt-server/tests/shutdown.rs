@@ -67,6 +67,16 @@ async fn a_zero_timeout_stops_without_waiting() {
     drop(raw);
 }
 
+/// Sends `signal` (e.g. `TERM`) to process `pid`.
+#[cfg(unix)]
+fn kill(signal: &str, pid: u32) {
+    let status = std::process::Command::new("kill")
+        .args([&format!("-{signal}"), &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
 /// The binary: SIGTERM → close 1001 → exit 0.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
@@ -108,11 +118,7 @@ async fn sigterm_shuts_the_binary_down_gracefully() {
     assert_eq!(recv(&mut ws).await.unwrap(), reply(H, 0, 1));
 
     let started = Instant::now();
-    let status = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    kill("TERM", child.id());
     assert_eq!(close_code(&mut ws).await, Some(CloseCode::Away));
     let exit = tokio::task::spawn_blocking(move || {
         // The rest of the log, so the child never blocks on a full pipe.
@@ -196,17 +202,10 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
     assert_eq!(recv(&mut ws).await.unwrap(), reply(H, 0, 1));
 
     write(&rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap());
-    let hup = |pid: u32| {
-        let status = Command::new("kill")
-            .args(["-HUP", &pid.to_string()])
-            .status()
-            .unwrap();
-        assert!(status.success());
-    };
-    hup(child.id());
+    kill("HUP", child.id());
     let reloaded = tokio::task::block_in_place(|| next("tls_reloaded"));
     assert!(reloaded.contains("trigger=signal"), "{reloaded}");
-    hup(child.id());
+    kill("HUP", child.id());
     tokio::task::block_in_place(|| next("tls_unchanged"));
 
     // Still the same process and connection.
@@ -214,9 +213,7 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
     assert_eq!(recv(&mut ws).await.unwrap(), reply(H, 0, 1));
     assert!(child.try_wait().unwrap().is_none());
 
-    let _ = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status();
+    kill("TERM", child.id());
     let exit = tokio::task::spawn_blocking(move || child.wait().unwrap())
         .await
         .unwrap();
@@ -250,25 +247,45 @@ async fn sighup_during_startup_does_not_kill_the_process() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // The process blocks opening the FIFO until a writer appears.
-    std::thread::sleep(Duration::from_millis(500));
-    let status = Command::new("kill")
-        .args(["-HUP", &child.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    // Wait until the child opens the FIFO to read its configuration, which it does after
+    // installing the SIGHUP handler: until then a non-blocking open for writing fails (ENXIO).
+    // No fixed sleep, so a slow start (cold binary, loaded CI) cannot make the test fail.
+    let deadline = Instant::now() + WAIT;
+    let mut writer = loop {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+        {
+            Ok(writer) => break writer,
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "the process exited before reading its configuration"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "the configuration was never opened"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("{}: {e}", fifo.display()),
+        }
+    };
+    // The child now blocks reading the configuration (no data yet, a writer is open): it is
+    // still starting when the signal arrives.
+    kill("HUP", child.id());
     std::thread::sleep(Duration::from_millis(100));
     assert!(
         child.try_wait().unwrap().is_none(),
         "SIGHUP during startup killed the process"
     );
 
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&fifo)
-        .unwrap()
+    writer
         .write_all(br#"{"servers":[{"server":{"host":"127.0.0.1","port":0}}],"workers":1}"#)
         .unwrap();
+    drop(writer);
     let stderr = BufReader::new(child.stderr.take().unwrap());
     let lines = tokio::task::spawn_blocking(move || {
         stderr
@@ -286,9 +303,7 @@ async fn sighup_during_startup_does_not_kill_the_process() {
         "{lines:?}"
     );
     assert!(child.try_wait().unwrap().is_none());
-    let _ = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status();
+    kill("TERM", child.id());
     assert!(child.wait().unwrap().success());
     std::fs::remove_dir_all(&dir).unwrap();
 }

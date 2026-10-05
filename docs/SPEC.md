@@ -345,7 +345,9 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
     applied to a shard with disconnects and expiry, both directly and through
     `OwnedMessage::copy_from` on a second shard with the same seed: `check_invariants` after
     every step, identical output on both paths, every outgoing message valid JSON for a known
-    connection.
+    connection (checked with `serde::de::IgnoredAny`: a `serde_json::Value` with the `raw_value`
+    feature rejects the valid key `"$serde_json::private::RawValue"`, which a client can send as
+    an info_hash; CI crash 2026-10-05, now a unit test and the seed `reserved-key`).
 
   CI job `fuzz`: each target 60 s on pull requests and pushes, 20 min nightly (`-timeout=10`,
   `-rss_limit_mb=4096`), the corpus found so far restored from the Actions cache, crash inputs
@@ -460,15 +462,16 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   0 on SIGTERM (its address is read from the `event=listening` log line); on SIGHUP it logs
   `tls_reloaded` (`trigger=signal`) after the certificate files changed and `tls_unchanged`
   otherwise, keeps running and keeps its connections; a SIGHUP while it is blocked reading its
-  configuration from a FIFO (provably mid-startup) does not kill it and becomes a
-  `reload_requested` after `started`.
+  configuration from a FIFO does not kill it and becomes a `reload_requested` after `started`
+  (the test waits until the child has opened the FIFO, proven by a non-blocking open for
+  writing succeeding, and keeps it open so the child is still reading: no fixed delay).
 - TLS reload (`tests/native.rs`): `Server::reload_tls` swaps certificate A for B (new
   connections get B, a connection opened before keeps working, a ticket from A still resumes);
   B's key with a new certificate is rejected and B kept; the file watcher (`tlsReloadInterval:
   1`) picks up C by itself; `wt_tls_reloads_total` and `wt_tls_certificate_expiry_seconds`.
   Unit tests (`tls.rs`): `notAfter` from UTCTime and GeneralizedTime, one attempt per file
-  change, the failure counters, a reload blocked before installing its certificate still holding
-  the reload lock (fails with the lock released after the stamp check); `logging.rs`: civil dates both ways.
+  change, the failure counters, `not_after` of the served certificate; `logging.rs`: civil
+  dates both ways.
 - `tests/observability.rs` (§13.7): `/swarms` (top 3 of 6 swarms over 4 shards by peers,
   `total`, `top=0` / default = all, `top=x` → 400, not on the public listener, its hex matching
   `?infoHash=`); connections counted by reason (`client_close`, `rejected`
@@ -808,12 +811,14 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
     PEM files again and swaps the served chain and key; `CertifiedKey::from_der` must accept the
     key and find it matching the leaf certificate (`keys_match`), else the previous certificate
     stays (a half-replaced pair during a renewal, a bad file) and the attempt is counted and
-    logged. Triggers: SIGHUP (§13.6; `Server::reload_tls`, always reads the files) and, every
-    `tlsReloadInterval` seconds on worker 0 (only if a listener has TLS), a change of modification time or length of either
-    file (following symlinks; one attempt per change; a missing file waits for the next check).
-    Files holding the certificate already served → unchanged. Reloads run one at a time (one
-    lock from reading the files' stamp to installing the certificate), so a slower reload of
-    older files never finishes after a newer one. Open connections keep their session. `notAfter` of the leaf is read from its DER (`validity`, UTCTime or
+    logged. All reloads run on one thread, `wt-tls` (`tls::Reloader`, started only if a listener
+    has TLS; ends with the `Server`), off the workers, so file reads never stall connections
+    and newer files are always installed last. Triggers: SIGHUP (§13.6; `Server::reload_tls`
+    sends a request to `wt-tls` and waits for the results; always reads the files) and, every
+    `tlsReloadInterval` seconds (counted from the last check), a change of modification time or
+    length of either file (following symlinks; one attempt per change; a missing file waits for
+    the next check). Files holding the certificate already served → unchanged. Open
+    connections keep their session. `notAfter` of the leaf is read from its DER (`validity`, UTCTime or
     GeneralizedTime) for the log and `/metrics`.
   - **Writes:** queued messages are sent with one vectored write per wake-up (frame headers +
     the shared encoder slices, no copy); TLS encrypts up to 64 KiB of frames per batch.

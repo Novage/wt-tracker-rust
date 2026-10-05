@@ -890,20 +890,6 @@ impl Worker {
         }
     }
 
-    /// Reloads the certificate of a wss:// listener when its files change (worker 0, every
-    /// `tlsReloadInterval` seconds; spec §13.2).
-    async fn watch_certificates(self: Rc<Self>) {
-        let interval = Duration::from_secs(self.shared.tls_reload_interval);
-        loop {
-            tokio::time::sleep(interval).await;
-            for listener in &self.shared.listeners {
-                if let Some(cert) = &listener.cert {
-                    crate::tls::log(&listener.name, &cert.reload(false), "file");
-                }
-            }
-        }
-    }
-
     /// Publishes how busy this worker's runtime is, for placement.
     async fn load_ticker(self: Rc<Self>) {
         let metrics = tokio::runtime::Handle::current().metrics();
@@ -994,10 +980,6 @@ pub(crate) fn run(
         if let Some(socket) = metrics {
             let socket = TcpListener::from_std(socket).expect("metrics listener");
             accepting.push(spawn_local(crate::metrics::accept_loop(me.clone(), socket)));
-        }
-        let has_tls = me.shared.listeners.iter().any(|l| l.cert.is_some());
-        if id == 0 && has_tls && me.shared.tls_reload_interval > 0 {
-            spawn_local(me.clone().watch_certificates());
         }
         let Ok(Phase::Drain(deadline)) = phase.wait_for(|p| *p != Phase::Running).await.map(|p| *p)
         else {
