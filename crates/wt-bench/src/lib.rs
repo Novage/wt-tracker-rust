@@ -266,16 +266,19 @@ pub fn run_reannounce(shard: &mut Shard, out: &mut Counter, ids: &Ids, now: u32)
 
 pub const ANSWERS: usize = 1_000_000;
 
-/// #5: answers to pseudo-random known peers.
+/// #5: answers between pseudo-random peers of one swarm, each from the sender's connection
+/// (all delivered, spec §5.3).
 pub fn run_answers(shard: &mut Shard, out: &mut Counter, ids: &Ids) {
     let answer = Offer(1);
     for i in 0..ANSWERS {
-        let to = (i * 2_654_435_761) % MP_PEERS;
+        let (c, from, to, s) = answer_pair(i);
         shard
             .handle(
                 0,
-                ConnId(0),
+                ConnId(c as u64),
                 Request::Answer {
+                    info_hash: &ids.swarms[s],
+                    peer_id: &ids.peers[from],
                     to_peer_id: &ids.peers[to],
                     answer: &answer,
                 },
@@ -389,7 +392,29 @@ pub fn proto_memberships() -> Vec<(usize, usize, usize)> {
         .collect()
 }
 
-/// Answer target of frame `n`: a pseudo-random known peer.
-pub fn answer_target(n: usize) -> usize {
-    (n * 2_654_435_761) % MP_PEERS
+/// Answer `n` of the multi-peer scenario: `(conn, from, to, swarm)`. `to` is a pseudo-random
+/// peer, `swarm` its first swarm, and `from` the peer `MP_SWARMS` further on: `mp_swarm(p, 0)`
+/// depends only on `p % MP_SWARMS` (which divides `MP_PEERS`), so both are members of it.
+pub fn answer_pair(n: usize) -> (usize, usize, usize, usize) {
+    let to = (n * 2_654_435_761) % MP_PEERS;
+    let from = (to + MP_SWARMS) % MP_PEERS;
+    (from / MP_PEERS_PER_CONN, from, to, mp_swarm(to, 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answer_pairs_are_members_of_one_swarm_on_the_senders_connection() {
+        for n in [0, 1, 12_345, ANSWERS - 1] {
+            let (c, from, to, s) = answer_pair(n);
+            assert_ne!(from, to);
+            assert_eq!(c, from / MP_PEERS_PER_CONN);
+            let swarms = |p: usize| (0..MP_SWARMS_PER_PEER).map(move |j| mp_swarm(p, j));
+            assert!(swarms(from).any(|x| x == s) && swarms(to).any(|x| x == s));
+        }
+        // Same as `answerPair(12345)` in bench/js/scenarios.ts.
+        assert_eq!(answer_pair(12_345), (59_848, 179_545, 169_545, 6_815));
+    }
 }

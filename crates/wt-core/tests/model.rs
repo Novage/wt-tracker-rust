@@ -26,6 +26,12 @@ enum Op {
         peer: u8,
         swarm: u8,
     },
+    Answer {
+        conn: u8,
+        from: u8,
+        to: u8,
+        swarm: u8,
+    },
     Disconnect {
         conn: u8,
     },
@@ -40,6 +46,8 @@ fn op() -> impl Strategy<Value = Op> {
         6 => (0..CONNS, 0..PEERS, 0..SWARMS, any::<bool>())
             .prop_map(|(conn, peer, swarm, completed)| Op::Announce { conn, peer, swarm, completed }),
         2 => (0..CONNS, 0..PEERS, 0..SWARMS).prop_map(|(conn, peer, swarm)| Op::Stop { conn, peer, swarm }),
+        2 => (0..CONNS, 0..PEERS, 0..PEERS, 0..SWARMS)
+            .prop_map(|(conn, from, to, swarm)| Op::Answer { conn, from, to, swarm }),
         1 => (0..CONNS).prop_map(|conn| Op::Disconnect { conn }),
         1 => (0..30u8).prop_map(|secs| Op::Advance { secs }),
         1 => Just(Op::Expire),
@@ -86,14 +94,17 @@ impl Model {
                 entry.0 = now;
                 entry.1 |= completed;
             }
-            Op::Stop { peer, swarm, .. } => {
+            // Only the peer's own connection can stop it (spec §5.4).
+            Op::Stop { conn, peer, swarm } => {
                 if let Some(p) = self.peers.get_mut(&peer)
+                    && p.conn == conn
                     && p.swarms.remove(&swarm).is_some()
                     && p.swarms.is_empty()
                 {
                     self.remove_peer(peer);
                 }
             }
+            Op::Answer { .. } => {}
             Op::Disconnect { conn } => {
                 let gone: Vec<u8> = self
                     .peers
@@ -122,6 +133,15 @@ impl Model {
             }
         }
         self.removed.sort();
+    }
+
+    /// Where an answer goes (spec §5.3): the target's connection if the sender is a peer of
+    /// `conn` in `swarm` and the target is in `swarm` too; `None`: dropped.
+    fn answer_target(&self, conn: u8, from: u8, to: u8, swarm: u8) -> Option<ConnId> {
+        let from = self.peers.get(&from)?;
+        let to = self.peers.get(&to)?;
+        (from.conn == conn && from.swarms.contains_key(&swarm) && to.swarms.contains_key(&swarm))
+            .then_some(ConnId(to.conn as u64))
     }
 
     /// swarm → (sorted peer_ids, completed count)
@@ -188,6 +208,26 @@ fn apply_to_shard(shard: &mut Shard, now: u32, op: &Op, out: &mut Recorder) {
                 )
                 .unwrap();
         }
+        Op::Answer {
+            conn,
+            from,
+            to,
+            swarm,
+        } => {
+            shard
+                .handle(
+                    now,
+                    ConnId(conn as u64),
+                    Request::Answer {
+                        info_hash: &info_hash(swarm),
+                        peer_id: &peer_id(from),
+                        to_peer_id: &peer_id(to),
+                        answer: &7u32,
+                    },
+                    out,
+                )
+                .unwrap();
+        }
         Op::Disconnect { conn } => shard.disconnect(ConnId(conn as u64), out),
         Op::Advance { .. } => {}
         Op::Expire => {
@@ -224,6 +264,20 @@ fn check(shard: &Shard, model: &Model, out: &Recorder, op: &Op) -> Result<(), Te
     for peer in 0..PEERS {
         let expected_conn = model.peers.get(&peer).map(|p| ConnId(p.conn as u64));
         prop_assert_eq!(shard.peer_connection(&peer_id(peer)), expected_conn);
+    }
+
+    if let Op::Answer {
+        conn,
+        from,
+        to,
+        swarm,
+    } = *op
+    {
+        let expected = match model.answer_target(conn, from, to, swarm) {
+            Some(to) => Event::Answer { to, answer: 7 },
+            None => Event::AnswerDropped,
+        };
+        prop_assert_eq!(&out.events, &vec![expected], "after {:?}", op);
     }
 
     // Offers of an announce: right count, distinct receivers in the swarm, never to self.

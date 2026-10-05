@@ -31,9 +31,12 @@ pub enum Message<'a> {
         numwant: Option<u32>,
         offers: Option<SmallVec<[Payload<'a>; INLINE_OFFERS]>>,
     },
+    /// `None` ids (too long, lone surrogate) can never match: the answer is dropped.
     Answer {
-        /// Raw `info_hash` token, for shard routing; not checked (same as JS).
-        info_hash: Option<&'a [u8]>,
+        /// The swarm (a string is required).
+        info_hash: Option<Key>,
+        /// The sender: must be a peer of the requesting connection in the swarm (spec §5.3).
+        peer_id: Option<Key>,
         to_peer_id: Key,
         answer: Payload<'a>,
     },
@@ -50,13 +53,11 @@ pub enum Message<'a> {
 
 impl Message<'_> {
     /// The `info_hash` that decides which shard owns the message. `None` for scrapes (they
-    /// may span shards), for stops that cannot match, and for answers without a usable
-    /// string `info_hash`.
+    /// may span shards), and for stops and answers that cannot match.
     pub fn route_info_hash(&self) -> Option<Key> {
         match self {
             Message::Announce { info_hash, .. } => Some(*info_hash),
-            Message::Answer { info_hash, .. } => lookup_key(*info_hash),
-            Message::Stop { info_hash, .. } => *info_hash,
+            Message::Answer { info_hash, .. } | Message::Stop { info_hash, .. } => *info_hash,
             Message::Scrape { .. } => None,
         }
     }
@@ -522,8 +523,13 @@ fn interpret<'a>(frame: &'a [u8], f: Fields<'a>) -> Result<Message<'a>, ProtoErr
             // JS drops every copy; cutting one would forward the other.
             return Err(ProtoError::BadField("to_peer_id"));
         }
+        // Required to check the swarm (spec §5.3; JS does not check it).
+        if !f.info_hash.is_some_and(is_string) {
+            return Err(ProtoError::BadField("info_hash"));
+        }
         return Ok(Message::Answer {
-            info_hash: f.info_hash,
+            info_hash: lookup_key(f.info_hash),
+            peer_id: lookup_key(f.peer_id),
             to_peer_id,
             answer: cut_member(frame, f.to_peer_id.expect("required_key checked it"))?,
         });

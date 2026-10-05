@@ -63,6 +63,12 @@ All notable changes to this project are listed here. The format follows
 
 ### Changed
 
+- **Hardening (differs from the JS tracker):** a `stop` is applied only from the connection
+  that owns the peer (peer_ids are public: any client could remove other viewers). An answer is
+  delivered only if its sender is a peer of the sending connection and both sender and target
+  are in the answer's swarm; otherwise it is dropped (`wt_dropped_answers_total`) and the
+  connection stays open, also for an unknown target (which closed it before). An answer needs a
+  string `info_hash` (else `bad_field`, close 1008) with any number of workers.
 - **Breaking:** `/stats.json` is a small summary (`torrentsCount`, `peersCount`, `servers`,
   `memory`, `workers`, `uptimeSeconds`); `peersCountPerInfoHashPerTracker`, `placement`,
   `traffic` and `droppedMessages` moved to `/metrics`, the per-info-hash list to `/swarms`. A

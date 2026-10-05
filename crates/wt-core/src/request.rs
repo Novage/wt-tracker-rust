@@ -42,7 +42,12 @@ pub enum Request<'a, O> {
         numwant: Option<u32>,
         offers: Option<&'a [O]>,
     },
+    /// Delivered only if `info_hash` names a swarm, the sender `peer_id` is a peer of the
+    /// requesting connection in it, and `to_peer_id` is in it too; otherwise dropped
+    /// ([`Outbox::answer_dropped`], spec §5.3).
     Answer {
+        info_hash: &'a [u8],
+        peer_id: &'a [u8],
         to_peer_id: &'a [u8],
         answer: &'a O,
     },
@@ -73,6 +78,10 @@ pub trait Outbox<O> {
 
     fn answer(&mut self, to: ConnId, answer: &O) {}
 
+    /// An answer was not delivered (spec §5.3): unknown swarm or peer, a sender of another
+    /// connection, or a sender or target outside the swarm.
+    fn answer_dropped(&mut self) {}
+
     fn scrape_entry(
         &mut self,
         to: ConnId,
@@ -99,15 +108,12 @@ impl<O> Outbox<O> for NullOutbox {}
 pub enum TrackerError {
     /// `info_hash` or `peer_id` is longer than [`crate::MAX_KEY_LEN`].
     KeyTooLong,
-    /// Answer addressed to a peer_id the shard does not know.
-    UnknownPeer,
 }
 
 impl fmt::Display for TrackerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::KeyTooLong => "info_hash or peer_id is too long",
-            Self::UnknownPeer => "answer: to_peer_id is not in the swarm",
         })
     }
 }

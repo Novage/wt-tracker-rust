@@ -175,26 +175,22 @@ async fn binary_fragmented_and_pipelined_frames() {
     assert_eq!(raw.read_text().await.unwrap(), reply(H[0], 0, 2));
 }
 
+/// Spec §5.3: an answer needs its swarm, with any number of workers.
 #[tokio::test(flavor = "multi_thread")]
-async fn answer_without_info_hash_needs_a_single_shard() {
-    for (workers, delivered) in [(1, true), (2, false)] {
+async fn answer_without_info_hash_is_rejected() {
+    for workers in [1, 2] {
         let server = hashed(workers);
         let (mut a, mut b) = (connect(&server).await, connect(&server).await);
         send(&mut a, &announce(H[0], "pa", 0)).await;
         recv(&mut a).await.unwrap();
+        send(&mut b, &announce(H[0], "pb", 0)).await;
+        recv(&mut b).await.unwrap();
         send(
             &mut b,
             r#"{"action":"announce","peer_id":"pb","to_peer_id":"pa","answer":{}}"#,
         )
         .await;
-        if delivered {
-            assert_eq!(
-                recv(&mut a).await.unwrap(),
-                r#"{"action":"announce","peer_id":"pb","answer":{}}"#
-            );
-        } else {
-            assert!(closed(&mut b).await, "workers {workers}");
-        }
+        assert!(closed(&mut b).await, "workers {workers}");
     }
 }
 

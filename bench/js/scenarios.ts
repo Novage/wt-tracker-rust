@@ -189,4 +189,10 @@ export function protoMemberships(): Int32Array {
   return out;
 }
 
-export const answerTarget = (n: number) => (n * 2_654_435_761) % MP_PEERS;
+/** Answer n: [conn, from, to, swarm] (same as `answer_pair` in wt-bench): `to` a
+ * pseudo-random peer, `swarm` its first swarm, `from` the peer MP_SWARMS further on (also in it). */
+export function answerPair(n: number): [number, number, number, number] {
+  const to = (n * 2_654_435_761) % MP_PEERS;
+  const from = (to + MP_SWARMS) % MP_PEERS;
+  return [Math.floor(from / MP_PEERS_PER_CONN), from, to, mpSwarm(to, 0)];
+}

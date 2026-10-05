@@ -2,7 +2,11 @@
 //   JS:   JSON.parse → FastTracker.processMessage → JSON.stringify   (as ../wt-tracker's
 //         uws-tracker; a parse error or TrackerError closes the connection → disconnect)
 //   Rust: wt_proto::handle (+ Shard) → Encoder; an error closes → Shard::disconnect
-// for every offer-selection strategy × parser backend. After every op it checks that
+// for every offer-selection strategy × parser backend. Deliberate differences of docs/SPEC.md
+// §8 that change behaviour are applied on the JS side before FastTracker sees the frame, so both
+// sides stay comparable: an answer is delivered only within its swarm from a peer of the
+// sending connection (else dropped), and one without a string info_hash is an error (§5.3).
+// After every op it checks that
 //   1. both sides sent the same bytes and reached the same state, and
 //   2. each side is correct per docs/SPEC.md on its own (so identical bugs cannot pass).
 //
@@ -51,7 +55,7 @@ const SDP_PIECES = ["v=0\r\n", "a=candidate:1 1 udp 2122260223 10.0.0.1 5000 typ
 /** Semantic description of a frame, used by the spec checks. */
 type Sem =
   | { kind: "announce"; info_hash: string; peer_id: string; numwant: number | null; offers: Item[] | null }
-  | { kind: "answer"; to_peer_id: string; frame: string }
+  | { kind: "answer"; info_hash?: string; peer_id: string; to_peer_id: string; frame: string }
   | { kind: "stop" }
   | { kind: "scrape"; info_hash: unknown }
   | { kind: "error" };
@@ -162,10 +166,13 @@ function generateTrace(seed: number, opsCount: number): { seed: number; ops: Op[
         ["action", '"announce"'], ["peer_id", json(peer)], ["to_peer_id", json(to)],
         ["answer", weighted<string>([[80, json({ type: "answer", sdp: sdp() })], [10, "null"], [10, "5"]])],
       ];
-      if (chance(0.8)) members.push(["info_hash", json(pick(hashes))]);
+      const info_hash = chance(0.8) ? pick(hashes) : undefined;
+      if (info_hash !== undefined) members.push(["info_hash", json(info_hash)]);
       if (chance(0.7)) members.push(["offer_id", json("o" + int(12))]);
       if (chance(0.2)) members.push(["extra", '[1,{"a":"b"}]']);
-      push(home.get(peer)!, shuffle(members), { kind: "answer", to_peer_id: to, frame: "" }, { forwarded: true });
+      // Mostly from the sender's home connection; sometimes from another one (dropped, §5.3).
+      const from = chance(0.9) ? home.get(peer)! : int(conns);
+      push(from, shuffle(members), { kind: "answer", info_hash, peer_id: peer, to_peer_id: to, frame: "" }, { forwarded: true });
     } else if (kind === "stop") {
       const info_hash = weighted<string>([[85, json(pick(hashes))], [10, '"nope"'], [5, "5"]]);
       push(home.get(peer)!, shuffle([["action", '"announce"'], ["event", '"stopped"'], ["info_hash", info_hash], ["peer_id", json(peer)]]), { kind: "stop" });
@@ -263,13 +270,25 @@ function runJs(trace: { seed: number; ops: Op[] }): Result[] {
     return c;
   };
 
+  // Spec §5.3 (a deliberate difference from FastTracker): an answer needs a string info_hash
+  // (else an error, closing the connection), and is delivered only if the sender is a peer of
+  // the sending connection in that swarm and the target is in it too (else dropped).
+  const answerAllowed = (m: Record<string, unknown>, c: Conn): boolean => {
+    if (typeof m.info_hash !== "string") throw new TrackerError("answer: info_hash is not a string");
+    const sw = tracker.swarms.get(m.info_hash);
+    const from = tracker.peers.get(m.peer_id as string);
+    const member = (id: unknown) => !!sw?.peers.some((p: { peerId: string }) => p.peerId === id);
+    return from?.connection === c && member(m.peer_id) && member(m.to_peer_id);
+  };
+
   const results: Result[] = [];
   for (const op of trace.ops) {
     out = { error: false, messages: [], removed: [], state: { swarms: {}, peers: {} } };
     if (op.op === "frame") {
       const c = conn(op.conn!);
       try {
-        tracker.processMessage(JSON.parse(op.frame!), c);
+        const message = JSON.parse(op.frame!);
+        if (op.sem?.kind !== "answer" || answerAllowed(message, c)) tracker.processMessage(message, c);
       } catch (e) {
         if (!(e instanceof SyntaxError || e instanceof TrackerError)) throw e;
         out.error = true;
@@ -292,7 +311,7 @@ function runJs(trace: { seed: number; ops: Op[] }): Result[] {
 
 // ---- spec checks (each side independently) ----
 
-const counts = { ops: 0, frames: 0, noncanonical: 0, offers: 0, fullFanOut: 0, partialFanOut: 0, answers: 0, connChanges: 0, errors: 0, removed: 0, expired: 0 };
+const counts = { ops: 0, frames: 0, noncanonical: 0, offers: 0, fullFanOut: 0, partialFanOut: 0, answers: 0, droppedAnswers: 0, connChanges: 0, errors: 0, removed: 0, expired: 0 };
 
 function specCheck(op: Op, r: Result, prev: State, side: string): string | undefined {
   const s = r.state;
@@ -316,9 +335,8 @@ function specCheck(op: Op, r: Result, prev: State, side: string): string | undef
   };
 
   if (op.op !== "frame") return only();
-  if ((sem!.kind === "error") !== r.error && !(sem!.kind === "answer" && prev.peers[sem!.to_peer_id] === undefined)) {
-    return fail(`error ${r.error} for ${sem!.kind}`);
-  }
+  const expectError = sem!.kind === "error" || (sem!.kind === "answer" && sem!.info_hash === undefined);
+  if (expectError !== r.error) return fail(`error ${r.error} for ${sem!.kind}`);
 
   switch (sem!.kind) {
     case "error":
@@ -355,9 +373,17 @@ function specCheck(op: Op, r: Result, prev: State, side: string): string | undef
       return only("reply", "offer");
     }
     case "answer": {
-      const to = prev.peers[sem.to_peer_id];
-      if (to === undefined) return r.error ? only() : fail("answer to unknown peer did not fail");
+      if (r.error) return only();
+      // Spec §5.3: delivered only from a peer of the sending connection to a peer, both in the
+      // answer's swarm; otherwise dropped.
+      const sw = sem.info_hash === undefined ? undefined : prev.swarms[sem.info_hash];
+      const allowed = prev.peers[sem.peer_id] === op.conn && !!sw?.peers.includes(sem.peer_id) && !!sw?.peers.includes(sem.to_peer_id);
       const answers = byKind(r, "answer");
+      if (!allowed) {
+        if (count) counts.droppedAnswers++;
+        return answers.length ? fail(`answer delivered against §5.3: ${json(answers)}`) : only();
+      }
+      const to = prev.peers[sem.to_peer_id];
       const body = JSON.parse(sem.frame);
       body.to_peer_id = undefined;
       if (answers.length !== 1 || answers[0][0] !== to || canonicalText(answers[0][1]) !== canonicalText(json(body))) return fail(`answers ${json(answers)}`);

@@ -21,6 +21,7 @@ pub enum Event {
         to: ConnId,
         answer: u32,
     },
+    AnswerDropped,
     ScrapeEntry {
         to: ConnId,
         info_hash: Vec<u8>,
@@ -103,6 +104,10 @@ impl Outbox<u32> for Recorder {
             to,
             answer: *answer,
         });
+    }
+
+    fn answer_dropped(&mut self) {
+        self.events.push(Event::AnswerDropped);
     }
 
     fn scrape_entry(

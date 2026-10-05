@@ -71,6 +71,8 @@ pub struct Counters {
     pub offers: Count,
     pub answers: Count,
     pub scrapes: Count,
+    /// Answers not delivered (spec §5.3).
+    pub answers_dropped: u64,
 }
 
 impl std::ops::AddAssign for Counters {
@@ -79,6 +81,7 @@ impl std::ops::AddAssign for Counters {
         self.offers += other.offers;
         self.answers += other.answers;
         self.scrapes += other.scrapes;
+        self.answers_dropped += other.answers_dropped;
     }
 }
 
@@ -236,6 +239,10 @@ impl<'a> Outbox<Payload<'a>> for Encoder {
         self.buf.extend_from_slice(head);
         self.buf.extend_from_slice(tail);
         self.finish(to, start, Kind::Answer);
+    }
+
+    fn answer_dropped(&mut self) {
+        self.counters.answers_dropped += 1;
     }
 
     fn scrape_entry(

@@ -40,7 +40,8 @@ enum Kind {
         offers: Option<SmallVec<[OwnedPayload; INLINE_OFFERS]>>,
     },
     Answer {
-        info_hash: Option<Span>,
+        info_hash: Option<Key>,
+        peer_id: Option<Key>,
         to_peer_id: Key,
         answer: OwnedPayload,
     },
@@ -120,10 +121,12 @@ impl OwnedMessage {
             },
             Message::Answer {
                 info_hash,
+                peer_id,
                 to_peer_id,
                 answer,
             } => Kind::Answer {
-                info_hash: info_hash.map(span),
+                info_hash: *info_hash,
+                peer_id: *peer_id,
                 to_peer_id: *to_peer_id,
                 answer: payload(answer),
             },
@@ -175,10 +178,12 @@ impl OwnedMessage {
             },
             Kind::Answer {
                 info_hash,
+                peer_id,
                 to_peer_id,
                 answer,
             } => Message::Answer {
-                info_hash: info_hash.map(slice),
+                info_hash: *info_hash,
+                peer_id: *peer_id,
                 to_peer_id: *to_peer_id,
                 answer: payload(answer),
             },

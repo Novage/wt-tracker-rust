@@ -363,6 +363,14 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
         |s, i| [s.local_requests, s.remote_requests][i],
     );
     t.per_worker(
+        "wt_dropped_answers_total",
+        "counter",
+        "Answers not delivered: unknown swarm or peer, a sender of another connection, or a \
+         sender or target outside the swarm.",
+        &stats,
+        |s| s.sent.answers_dropped,
+    );
+    t.per_worker(
         "wt_moved_connections_total",
         "counter",
         "Connections that moved to the worker at their first announce.",

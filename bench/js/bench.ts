@@ -17,7 +17,7 @@ import {
   announce,
   announceFrame,
   answerFrame,
-  answerTarget,
+  answerPair,
   protoMemberships,
   counter,
   makeConns,
@@ -126,11 +126,13 @@ const answerMessage: Record<string, unknown> = {
   answer: { type: "answer", sdp: "x" },
 };
 const answers = (t: Tracker) => {
-  const from = ids.conns[0];
   for (let i = 0; i < ANSWERS; i++) {
+    const [c, from, to, s] = answerPair(i);
+    answerMessage.info_hash = ids.swarms[s];
+    answerMessage.peer_id = ids.peers[from];
     // processAnswer clears to_peer_id, so set it every time.
-    answerMessage.to_peer_id = ids.peers[(i * 2_654_435_761) % MP_PEERS];
-    t.processMessage(answerMessage, from);
+    answerMessage.to_peer_id = ids.peers[to];
+    t.processMessage(answerMessage, ids.conns[c]);
   }
 };
 
@@ -296,7 +298,8 @@ scenarios.push(bench("expire_sweep", MP_MEMBERSHIPS, expireSweep));
   for (let n = 0; n < PROTO_FRAMES; n++) {
     const [c, p, s] = [members[n * 3], members[n * 3 + 1], members[n * 3 + 2]];
     announces.push([c, Buffer.from(announceFrame(ids.swarms[s], ids.peers[p], n))]);
-    answers.push([c, Buffer.from(answerFrame(ids.swarms[s], ids.peers[p], ids.peers[answerTarget(n)], n))]);
+    const [answerConn, from, to, swarm] = answerPair(n);
+    answers.push([answerConn, Buffer.from(answerFrame(ids.swarms[swarm], ids.peers[from], ids.peers[to], n))]);
   }
   // As uws-tracker.onMessage: StringDecoder over the received bytes, then JSON.parse.
   const decoder = new StringDecoder();

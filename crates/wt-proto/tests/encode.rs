@@ -132,50 +132,95 @@ fn offer_without_offer_id_or_sdp() {
 
 #[test]
 fn answer_is_forwarded_without_to_peer_id() {
-    let join = (
-        1,
-        r#"{"action":"announce","info_hash":"h1","peer_id":"p1"}"#,
-    );
+    let joins = [
+        (
+            1,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p1"}"#,
+        ),
+        (
+            2,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2"}"#,
+        ),
+    ];
+    let with = |frame| [joins[0], joins[1], (2, frame)];
     check(
-        &[
-            join,
-            (
-                2,
-                r#"{"action":"announce","info_hash":"h1","peer_id":"p2","to_peer_id":"p1","answer":{"type":"answer","sdp":"y"},"offer_id":"o1","extra":[1,2]}"#,
-            ),
-        ],
+        &with(
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","to_peer_id":"p1","answer":{"type":"answer","sdp":"y"},"offer_id":"o1","extra":[1,2]}"#,
+        ),
         &[(
             1,
             r#"{"action":"announce","info_hash":"h1","peer_id":"p2","answer":{"type":"answer","sdp":"y"},"offer_id":"o1","extra":[1,2]}"#,
         )],
     );
     check(
-        &[
-            join,
-            (
-                2,
-                r#"{"to_peer_id":"p1","action":"announce","peer_id":"p2","answer":null}"#,
-            ),
-        ],
-        &[(1, r#"{"action":"announce","peer_id":"p2","answer":null}"#)],
+        &with(
+            r#"{"to_peer_id":"p1","action":"announce","info_hash":"h1","peer_id":"p2","answer":null}"#,
+        ),
+        &[(
+            1,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","answer":null}"#,
+        )],
     );
 }
 
+/// Spec §5.3: an answer that may not be delivered is dropped without an error.
 #[test]
-fn answer_to_unknown_peer_fails() {
+fn answer_outside_the_rules_is_dropped() {
+    let joins = [
+        (
+            1,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p1"}"#,
+        ),
+        (
+            2,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2"}"#,
+        ),
+    ];
+    for frame in [
+        // Unknown target, unknown swarm, sender of another connection, unknown sender.
+        (
+            2,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","to_peer_id":"nobody","answer":{}}"#,
+        ),
+        (
+            2,
+            r#"{"action":"announce","info_hash":"h2","peer_id":"p2","to_peer_id":"p1","answer":{}}"#,
+        ),
+        (
+            3,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","to_peer_id":"p1","answer":{}}"#,
+        ),
+        (
+            2,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p3","to_peer_id":"p1","answer":{}}"#,
+        ),
+        // Ids that cannot be keys.
+        (
+            2,
+            &*format!(
+                r#"{{"action":"announce","info_hash":"{}","peer_id":"p2","to_peer_id":"p1","answer":{{}}}}"#,
+                "h".repeat(100)
+            ),
+        ),
+    ] {
+        check(&[joins[0], joins[1], frame], &[]);
+    }
+}
+
+/// Spec §5.3: the swarm is required.
+#[test]
+fn answer_without_info_hash_is_rejected() {
     for (name, _, handle) in backends() {
-        let r = run(
-            handle,
-            &[(
-                2,
-                r#"{"action":"announce","peer_id":"p2","to_peer_id":"nobody","answer":{}}"#,
-            )],
-        );
-        assert_eq!(
-            r,
-            Err(ProtoError::Tracker(wt_core::TrackerError::UnknownPeer)),
-            "{name}"
-        );
+        for frame in [
+            r#"{"action":"announce","peer_id":"p2","to_peer_id":"p1","answer":{}}"#,
+            r#"{"action":"announce","info_hash":5,"peer_id":"p2","to_peer_id":"p1","answer":{}}"#,
+        ] {
+            assert_eq!(
+                run(handle, &[(2, frame)]),
+                Err(ProtoError::BadField("info_hash")),
+                "{name}: {frame}"
+            );
+        }
     }
 }
 

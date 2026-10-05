@@ -227,9 +227,36 @@ fn answer_with_any_value_and_no_event() {
         r#"{"action":"announce","peer_id":5,"to_peer_id":"p2","answer":{}}"#,
         ProtoError::BadField("peer_id"),
     );
-    // info_hash is not checked.
-    each(
+    // The swarm is required (spec §5.3), the sender decoded.
+    err(
         r#"{"action":"announce","peer_id":"p1","to_peer_id":"p2","answer":{}}"#,
+        ProtoError::BadField("info_hash"),
+    );
+    err(
+        r#"{"action":"announce","info_hash":[],"peer_id":"p1","to_peer_id":"p2","answer":{}}"#,
+        ProtoError::BadField("info_hash"),
+    );
+    each(
+        r#"{"action":"announce","info_hash":"h1","peer_id":"p1","to_peer_id":"p2","answer":{}}"#,
+        |b, r| match r {
+            Ok(Message::Answer {
+                info_hash: Some(h),
+                peer_id: Some(p),
+                ..
+            }) => assert_eq!(
+                (h.as_bytes(), p.as_bytes()),
+                (&b"h1"[..], &b"p1"[..]),
+                "{b}"
+            ),
+            other => panic!("{b}: {other:?}"),
+        },
+    );
+    // A string that cannot be a key: accepted, matches nothing (dropped by the shard).
+    each(
+        &format!(
+            r#"{{"action":"announce","info_hash":"{}","peer_id":"p1","to_peer_id":"p2","answer":{{}}}}"#,
+            "h".repeat(100)
+        ),
         |b, r| {
             assert!(
                 matches!(
@@ -271,20 +298,20 @@ fn answer_text(frame: &str) -> Vec<(String, String)> {
 fn answer_body_is_the_frame_without_to_peer_id() {
     for (frame, expected) in [
         (
-            r#"{"action":"announce","peer_id":"p2","to_peer_id":"p1","answer":{"sdp":"y"},"x":[1]}"#,
-            r#"{"action":"announce","peer_id":"p2","answer":{"sdp":"y"},"x":[1]}"#,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","to_peer_id":"p1","answer":{"sdp":"y"},"x":[1]}"#,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","answer":{"sdp":"y"},"x":[1]}"#,
         ),
         (
-            r#"{"to_peer_id":"p1","action":"announce","peer_id":"p2","answer":null}"#,
-            r#"{"action":"announce","peer_id":"p2","answer":null}"#,
+            r#"{"to_peer_id":"p1","action":"announce","info_hash":"h1","peer_id":"p2","answer":null}"#,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","answer":null}"#,
         ),
         (
-            r#"{"action":"announce","peer_id":"p2","answer":1,"to_peer_id":"p1"}"#,
-            r#"{"action":"announce","peer_id":"p2","answer":1}"#,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","answer":1,"to_peer_id":"p1"}"#,
+            r#"{"action":"announce","info_hash":"h1","peer_id":"p2","answer":1}"#,
         ),
         (
-            "{ \"action\" : \"announce\" , \"peer_id\":\"p2\",\n \"to_peer_id\" :\t\"p1\" , \"answer\":1 }",
-            "{ \"action\" : \"announce\" , \"peer_id\":\"p2\" , \"answer\":1 }",
+            "{ \"action\" : \"announce\" , \"info_hash\":\"h1\", \"peer_id\":\"p2\",\n \"to_peer_id\" :\t\"p1\" , \"answer\":1 }",
+            "{ \"action\" : \"announce\" , \"info_hash\":\"h1\", \"peer_id\":\"p2\" , \"answer\":1 }",
         ),
     ] {
         for (b, text) in answer_text(frame) {
@@ -293,7 +320,7 @@ fn answer_body_is_the_frame_without_to_peer_id() {
     }
     // A key spelled with escapes is not produced by JSON.stringify: rejected.
     err(
-        r#"{"action":"announce","peer_id":"p2","to_peer~u005fid":"p1","answer":1}"#,
+        r#"{"action":"announce","info_hash":"h1","peer_id":"p2","to_peer~u005fid":"p1","answer":1}"#,
         ProtoError::BadField("to_peer_id"),
     );
 }

@@ -16,6 +16,10 @@ const FRAMES: [&str; 6] = [
     r#"{"action":"announce","event":"stopped","info_hash":"h1","peer_id":"p2"}"#,
 ];
 
+/// The connection each frame comes from: p2's answer and stop from p2's own connection (1), so
+/// they take effect (spec §5.3, §5.4).
+const CONNS: [u64; 6] = [0, 1, 1, 0, 0, 1];
+
 #[test]
 fn owned_message_round_trips_and_applies_identically() {
     for (name, parse, _) in backends() {
@@ -36,12 +40,19 @@ fn owned_message_round_trips_and_applies_identically() {
 
             // The owned form is Send: apply it on another thread.
             let owned = std::thread::spawn(move || owned).join().unwrap();
-            let conn = ConnId(i as u64 % 2);
+            let conn = ConnId(CONNS[i]);
             out_direct.clear();
             out_owned.clear();
             apply(&mut direct, 0, conn, &message, &mut out_direct).unwrap();
             apply(&mut via_owned, 0, conn, &owned.message(), &mut out_owned).unwrap();
             assert_eq!(texts(&out_owned), texts(&out_direct), "{name} frame {i}");
+            if i == 2 {
+                assert_eq!(
+                    texts(&out_direct).len(),
+                    1,
+                    "{name}: the answer is delivered"
+                );
+            }
         }
     }
 }
@@ -51,7 +62,7 @@ fn take_moves_messages_into_one_shared_buffer() {
     let mut shard = Shard::new(Settings::default(), 1);
     let mut out = Encoder::new();
     for (i, text) in FRAMES[..3].iter().enumerate() {
-        wt_proto::handle(&mut shard, 0, ConnId(i as u64), text.as_bytes(), &mut out).unwrap();
+        wt_proto::handle(&mut shard, 0, ConnId(CONNS[i]), text.as_bytes(), &mut out).unwrap();
     }
     let expected = texts(&out);
     let batch = out.take();

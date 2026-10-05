@@ -133,16 +133,23 @@ pub fn apply(
             out,
         )?,
         Message::Answer {
-            to_peer_id, answer, ..
+            info_hash: Some(info_hash),
+            peer_id: Some(peer_id),
+            to_peer_id,
+            answer,
         } => shard.handle(
             now,
             conn,
             Request::Answer {
+                info_hash: info_hash.as_bytes(),
+                peer_id: peer_id.as_bytes(),
                 to_peer_id: to_peer_id.as_bytes(),
                 answer,
             },
             out,
         )?,
+        // An id that cannot match anything: not delivered (spec §5.3).
+        Message::Answer { .. } => wt_core::Outbox::<Payload<'_>>::answer_dropped(out),
         Message::Stop {
             info_hash: Some(info_hash),
             peer_id: Some(peer_id),

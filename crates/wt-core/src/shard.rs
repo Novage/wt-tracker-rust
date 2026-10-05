@@ -154,15 +154,20 @@ impl Shard {
                     now, conn, info_hash, peer_id, completed, numwant, offers, out,
                 )
             }
-            Request::Answer { to_peer_id, answer } => {
-                let p = self
-                    .find_peer(to_peer_id)
-                    .ok_or(TrackerError::UnknownPeer)?;
-                out.answer(self.peers[p as usize].conn, answer);
+            Request::Answer {
+                info_hash,
+                peer_id,
+                to_peer_id,
+                answer,
+            } => {
+                match self.answer_target(conn, info_hash, peer_id, to_peer_id) {
+                    Some(to) => out.answer(to, answer),
+                    None => out.answer_dropped(),
+                }
                 Ok(())
             }
             Request::Stop { info_hash, peer_id } => {
-                self.stop(info_hash, peer_id, out);
+                self.stop(conn, info_hash, peer_id, out);
                 Ok(())
             }
             Request::Scrape { target } => {
@@ -240,25 +245,18 @@ impl Shard {
                 let p = self.insert_peer(peer_hash, peer_id, conn);
                 self.add_member(p, swarm, now, completed)
             }
-            Some(p) => {
-                let existing = self.peers[p as usize]
-                    .members
-                    .iter()
-                    .find(|pm| pm.swarm == swarm)
-                    .map(|pm| pm.member);
-                match existing {
-                    Some(m) => {
-                        let member = &mut self.members[m as usize];
-                        member.last_seen = now;
-                        if completed && !member.completed {
-                            member.completed = true;
-                            self.swarms[swarm as usize].completed += 1;
-                        }
-                        m
+            Some(p) => match self.membership(p, swarm) {
+                Some(m) => {
+                    let member = &mut self.members[m as usize];
+                    member.last_seen = now;
+                    if completed && !member.completed {
+                        member.completed = true;
+                        self.swarms[swarm as usize].completed += 1;
                     }
-                    None => self.add_member(p, swarm, now, completed),
+                    m
                 }
-            }
+                None => self.add_member(p, swarm, now, completed),
+            },
         };
 
         let s = &self.swarms[swarm as usize];
@@ -353,19 +351,53 @@ impl Shard {
         swarm.cursor = idx as u32;
     }
 
-    fn stop<O>(&mut self, info_hash: &[u8], peer_id: &[u8], out: &mut impl Outbox<O>) {
+    /// The connection of an answer's target, if the answer may be delivered: the swarm exists,
+    /// the sender is a peer of `conn` in it, and the target is in it too (spec §5.3).
+    fn answer_target(
+        &self,
+        conn: ConnId,
+        info_hash: &[u8],
+        peer_id: &[u8],
+        to_peer_id: &[u8],
+    ) -> Option<ConnId> {
+        let swarm = self.find_swarm(info_hash)?;
+        let from = self.find_peer(peer_id)?;
+        if self.peers[from as usize].conn != conn {
+            return None;
+        }
+        self.membership(from, swarm)?;
+        let to = self.find_peer(to_peer_id)?;
+        self.membership(to, swarm)?;
+        Some(self.peers[to as usize].conn)
+    }
+
+    /// The member of peer `p` in `swarm`, if it is in it (a peer is in few swarms: a scan).
+    fn membership(&self, p: Idx, swarm: Idx) -> Option<Idx> {
+        self.peers[p as usize]
+            .members
+            .iter()
+            .find(|pm| pm.swarm == swarm)
+            .map(|pm| pm.member)
+    }
+
+    /// Removes the peer from the swarm; only its own connection may (spec §5.4).
+    fn stop<O>(
+        &mut self,
+        conn: ConnId,
+        info_hash: &[u8],
+        peer_id: &[u8],
+        out: &mut impl Outbox<O>,
+    ) {
         let Some(swarm) = self.find_swarm(info_hash) else {
             return;
         };
         let Some(p) = self.find_peer(peer_id) else {
             return;
         };
-        let Some(m) = self.peers[p as usize]
-            .members
-            .iter()
-            .find(|pm| pm.swarm == swarm)
-            .map(|pm| pm.member)
-        else {
+        if self.peers[p as usize].conn != conn {
+            return;
+        }
+        let Some(m) = self.membership(p, swarm) else {
             return;
         };
 

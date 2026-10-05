@@ -562,10 +562,9 @@ impl Worker {
             }
             // A stop that cannot match anything.
             None if matches!(message, Message::Stop { .. }) => Ok(Routed::Done),
-            // An answer without a usable info_hash: fine with one shard (JS semantics), but it
-            // cannot be routed between shards (JS multi-worker rejects it too).
-            None if workers == 1 => self.apply_local(conn, message).map(|_| Routed::Done),
-            None => Err(ProtoError::BadField("info_hash")),
+            // An answer whose ids cannot match anything (an info_hash that cannot be a key):
+            // the local shard drops and counts it (spec §5.3).
+            None => self.apply_local(conn, message).map(|_| Routed::Done),
         }
     }
 

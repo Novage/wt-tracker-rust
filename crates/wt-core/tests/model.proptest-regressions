@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc fb687522fe9bbb11ef1485b6e170f3ff05eed17bad7de646f88b6e9750a72086 # shrinks to ops = [Announce { conn: 0, peer: 2, swarm: 1, completed: false }, Announce { conn: 0, peer: 1, swarm: 1, completed: false }, Answer { conn: 1, from: 1, to: 1, swarm: 1 }]
+cc 765ac2bd7bd7b06e2fee9b74460c2a38315eda9680f3707fb2412ce4396de1af # shrinks to ops = [Announce { conn: 0, peer: 1, swarm: 2, completed: false }, Stop { conn: 1, peer: 1, swarm: 2 }]
+cc 3e9f8df850f285cf44656d07d95911f6fef17089ca4e4879f6055c9bba030b80 # shrinks to ops = [Announce { conn: 0, peer: 3, swarm: 2, completed: false }, Stop { conn: 1, peer: 3, swarm: 2 }]

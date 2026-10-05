@@ -273,16 +273,10 @@ fn proto_scenarios(ids: &Ids, scenarios: &mut Vec<Value>) {
             )
         })
         .collect();
-    let answers: Vec<(u64, Vec<u8>)> = members
-        .iter()
-        .enumerate()
-        .map(|(n, &(c, p, s))| {
-            let frame = answer_frame(
-                &ids.swarms[s],
-                &ids.peers[p],
-                &ids.peers[answer_target(n)],
-                n,
-            );
+    let answers: Vec<(u64, Vec<u8>)> = (0..members.len())
+        .map(|n| {
+            let (c, from, to, s) = answer_pair(n);
+            let frame = answer_frame(&ids.swarms[s], &ids.peers[from], &ids.peers[to], n);
             (c as u64, frame.into_bytes())
         })
         .collect();

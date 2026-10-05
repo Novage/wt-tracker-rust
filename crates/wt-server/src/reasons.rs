@@ -77,7 +77,6 @@ labels! {
         UnknownEvent => "unknown_event",
         BadField => "bad_field",
         KeyTooLong => "key_too_long",
-        UnknownPeer => "unknown_peer",
     }
 }
 
@@ -92,7 +91,6 @@ impl From<&ProtoError> for RejectReason {
             ProtoError::KeyTooLong | ProtoError::Tracker(TrackerError::KeyTooLong) => {
                 Self::KeyTooLong
             }
-            ProtoError::Tracker(TrackerError::UnknownPeer) => Self::UnknownPeer,
         }
     }
 }
@@ -138,7 +136,7 @@ mod tests {
         labels.sort();
         labels.dedup();
         assert_eq!(labels.len(), CloseReason::COUNT);
-        assert_eq!(RejectReason::COUNT, 7);
+        assert_eq!(RejectReason::COUNT, 6);
     }
 
     #[test]
@@ -147,8 +145,8 @@ mod tests {
         assert_eq!(CloseReason::from_code(1008), CloseReason::Rejected);
         assert_eq!(CloseReason::from_code(1000), CloseReason::ServerClose);
         assert_eq!(
-            RejectReason::from(&ProtoError::Tracker(TrackerError::UnknownPeer)),
-            RejectReason::UnknownPeer
+            RejectReason::from(&ProtoError::Tracker(TrackerError::KeyTooLong)),
+            RejectReason::KeyTooLong
         );
     }
 }

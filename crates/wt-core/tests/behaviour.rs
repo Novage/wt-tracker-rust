@@ -404,26 +404,35 @@ fn no_offers_in_a_swarm_of_one() {
     assert!(out.offers().is_empty());
 }
 
-#[test]
-fn answer_is_routed_to_the_peer_connection() {
-    let mut shard = shard();
-    let mut out = Recorder::default();
-    announce(&mut shard, &mut out, 0, 1, "X", "a", AnnounceEvent::Started).unwrap();
-    announce(&mut shard, &mut out, 0, 1, "Y", "b", AnnounceEvent::Started).unwrap();
-    out.take();
-
-    let answer = |shard: &mut Shard, out: &mut Recorder, to: &[u8]| {
-        shard.handle(
+/// An answer from `conn` as `from` to `to` in swarm `info_hash`.
+fn answer(shard: &mut Shard, out: &mut Recorder, conn: u64, info_hash: &str, from: &str, to: &str) {
+    shard
+        .handle(
             0,
-            ConnId(7),
+            ConnId(conn),
             Request::Answer {
-                to_peer_id: to,
+                info_hash: info_hash.as_bytes(),
+                peer_id: from.as_bytes(),
+                to_peer_id: to.as_bytes(),
                 answer: &42u32,
             },
             out,
         )
-    };
-    answer(&mut shard, &mut out, b"b").unwrap();
+        .unwrap();
+}
+
+/// Spec §5.3: delivered only from a peer of the requesting connection to a peer, both in the
+/// answer's swarm; anything else is dropped (counted), never an error.
+#[test]
+fn answer_goes_only_between_members_of_its_swarm() {
+    let mut shard = shard();
+    let mut out = Recorder::default();
+    announce(&mut shard, &mut out, 0, 1, "X", "a", AnnounceEvent::Started).unwrap();
+    announce(&mut shard, &mut out, 0, 2, "X", "b", AnnounceEvent::Started).unwrap();
+    announce(&mut shard, &mut out, 0, 3, "Y", "c", AnnounceEvent::Started).unwrap();
+    out.take();
+
+    answer(&mut shard, &mut out, 2, "X", "b", "a");
     assert_eq!(
         out.take(),
         [Event::Answer {
@@ -431,11 +440,47 @@ fn answer_is_routed_to_the_peer_connection() {
             answer: 42
         }]
     );
-    assert_eq!(
-        answer(&mut shard, &mut out, b"zzz"),
-        Err(TrackerError::UnknownPeer)
-    );
+    for (conn, info_hash, from, to, why) in [
+        (2, "Z", "b", "a", "unknown swarm"),
+        (2, "X", "nobody", "a", "unknown sender"),
+        (1, "X", "b", "a", "sender of another connection"),
+        (3, "X", "c", "a", "sender not in the swarm"),
+        (2, "X", "b", "c", "target not in the swarm"),
+        (2, "X", "b", "zzz", "unknown target"),
+    ] {
+        answer(&mut shard, &mut out, conn, info_hash, from, to);
+        assert_eq!(out.take(), [Event::AnswerDropped], "{why}");
+    }
+    shard.check_invariants().unwrap();
+}
+
+/// Spec §5.4: only the peer's own connection can stop it.
+#[test]
+fn stop_from_another_connection_is_ignored() {
+    let mut shard = shard();
+    let mut out = Recorder::default();
+    announce(&mut shard, &mut out, 0, 1, "X", "a", AnnounceEvent::Started).unwrap();
+    announce(&mut shard, &mut out, 0, 2, "X", "b", AnnounceEvent::Started).unwrap();
+    out.take();
+    stop(&mut shard, &mut out, 2, "X", "a");
+    assert_eq!(swarm_peers(&shard, "X"), ["a", "b"]);
     assert!(out.events.is_empty());
+    stop(&mut shard, &mut out, 1, "X", "a");
+    assert_eq!(swarm_peers(&shard, "X"), ["b"]);
+    shard.check_invariants().unwrap();
+}
+
+/// A peer_id that moved to a new connection: a late stop from the old one is ignored.
+#[test]
+fn late_stop_from_a_previous_connection_is_ignored() {
+    let mut shard = shard();
+    let mut out = Recorder::default();
+    announce(&mut shard, &mut out, 0, 1, "X", "a", AnnounceEvent::Started).unwrap();
+    announce(&mut shard, &mut out, 0, 2, "X", "a", AnnounceEvent::Started).unwrap();
+    stop(&mut shard, &mut out, 1, "X", "a");
+    assert_eq!(swarm_peers(&shard, "X"), ["a"]);
+    assert_eq!(shard.peer_connection(b"a"), Some(ConnId(2)));
+    shard.check_invariants().unwrap();
 }
 
 #[test]

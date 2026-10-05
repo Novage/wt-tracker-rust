@@ -146,16 +146,22 @@ peers that joined at the same time. All three strategies give every peer the sam
 receiving offers. Only `RandomSample` makes the receivers of one announce independent of each
 other.
 
-### 5.3 Answer (`Request::Answer { to_peer_id, answer }`)
+### 5.3 Answer (`Request::Answer { info_hash, peer_id, to_peer_id, answer }`)
 
-Looks up `to_peer_id` in the shard's peer table (not checked against a swarm). If found, emits
-`answer(peer.conn, answer)`; otherwise `Err(UnknownPeer)`.
+Delivered (`answer(target.conn, answer)`) only if the swarm `info_hash` exists, the sender
+`peer_id` is a peer of the requesting connection and a member of that swarm, and `to_peer_id` is
+a member of that swarm too. Otherwise it is dropped (`answer_dropped()`, counted as
+`wt_dropped_answers_total`), never an error, so the connection stays open: an answer racing a
+disconnect, a stop or a quality switch is normal. Each check is a hash lookup and a scan of the
+peer's few memberships (§8: JS delivers to any known `to_peer_id` and fails on an unknown one).
 
 ### 5.4 Stop (`Request::Stop { info_hash, peer_id }`)
 
-If the swarm, the peer and their membership all exist, the membership is removed. A peer left
-without memberships is removed (`peer_removed`). Anything unknown is a silent no-op. The
-requesting connection is not checked (§8).
+If the swarm, the peer and their membership all exist and the peer belongs to the requesting
+connection, the membership is removed. A peer left without memberships is removed
+(`peer_removed`). Anything else is a silent no-op: an unknown swarm or peer, and a stop from
+another connection (a client cannot remove other viewers, whose peer_ids it learns from offers;
+a late stop from a connection the peer_id left is ignored too; §8).
 
 ### 5.5 Scrape (`Request::Scrape { target }`)
 
@@ -181,14 +187,14 @@ memberships removed. The caller decides when to run it; the JS tracker sweeps ev
 | Error | When | State change |
 |---|---|---|
 | `KeyTooLong` | announce with `info_hash` or `peer_id` > `MAX_KEY_LEN` | none |
-| `UnknownPeer` | answer to an unknown `to_peer_id` | none |
 
-Stop and scrape never fail. Malformed JSON and missing fields will be rejected by the protocol
+Answer, stop and scrape never fail. Malformed JSON and missing fields will be rejected by the protocol
 layer before reaching the core.
 
 ### 5.9 Outbox events
 
-`announce_reply`, `offer`, `answer`, `scrape_entry`, `scrape_end`, `peer_removed`. All are
+`announce_reply`, `offer`, `answer`, `answer_dropped` (§5.3), `scrape_entry`, `scrape_end`,
+`peer_removed`. All are
 called synchronously during the call that causes them, with borrowed arguments: copy or
 serialize before returning. `peer_removed` is emitted for disconnect, a stop of the last swarm,
 expiry, and a connection change. It corresponds to JS `onRemovePeer`.
@@ -228,8 +234,8 @@ ignored but still validated (answers forward them).
 | `left` | a number equal to 0 (`0`, `-0`, `0.0`) → `left_zero`; `"0"` is not | |
 | `offers` | absent → `None`; an array whose items are objects with `offer` an object or array (JS `typeof "object"`, not `null`) → one `Payload::Offer { offer_id, sdp }` per item (raw values, `None` if absent); anything else | `BadField("offers")` |
 | answer `to_peer_id` | a string ≤ 40 bytes (`BadField` / `KeyTooLong`); the key must be spelled literally (escaped spelling → `BadField`) | |
-| answer `peer_id` | must be a string (not decoded) | `BadField` |
-| answer `info_hash` | not checked; kept raw for shard routing | |
+| answer `peer_id` | must be a string; decoded (the sender, §5.3; an id that cannot be a key matches nothing: dropped) | `BadField` |
+| answer `info_hash` | must be a string (the swarm, §5.3); decoded, also for shard routing (an id that cannot be a key: dropped) | `BadField` |
 | answer body | the frame with the `to_peer_id` member (and one adjacent comma) cut out: `Payload::Answer { head, tail }`, two slices, no copy | |
 | stop `peer_id` | must be a string | `BadField` |
 | stop ids that cannot match (non-string `info_hash`, > 40 bytes, lone surrogate) | no-op | `Ok` |
@@ -261,7 +267,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | `UnknownAction` / `UnknownEvent` | §7.1 |
 | `BadField(name)` | a field with the wrong type or an unsupported form (§7.1) |
 | `KeyTooLong` | announce `info_hash` / `peer_id` or answer `to_peer_id` > 40 bytes |
-| `Tracker(TrackerError)` | rejected by the core (§5.8), e.g. answer to an unknown peer |
+| `Tracker(TrackerError)` | rejected by the core (§5.8); unreachable from frames (keys are checked when parsing) |
 
 ### 7.4 Parser backends, encoder and allocation
 
@@ -306,16 +312,15 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | `x-webkit-deflate-frame` (old Safari) | negotiated | not negotiated | obsolete |
 | Compressed outgoing messages | never | messages ≥ 1 KiB (offers) when negotiated; `compressOutgoingMinSize: 0` = never | ~25% less egress at no measurable CPU on production traffic (§12) |
 | Inflated message > `maxPayloadLength` / corrupt | connection closed | close 1009 / 1007 | |
-| Answer without a string `info_hash`, several workers | single tracker: delivered; multi-worker: error | 1 worker: delivered; > 1: `BadField("info_hash")` → close | cannot be routed to a shard |
-| Answer target only in a swarm of another shard | delivered (one global peer table) | `UnknownPeer` → close | per-shard peer tables; real answers target a member of the same swarm |
+| Answer without a string `info_hash` | single tracker: delivered; multi-worker: error | `BadField("info_hash")` → close | the swarm is needed to check the answer (§5.3) |
 | `/stats.json` | `torrentsCount`, `peersCount`, `servers`, `memory` (`process.memoryUsage()`), `peersCountPerInfoHashPerTracker` | a small summary (§13.5), `?infoHash=` for one swarm; counters in `/metrics` (§13.7) | the per-info-hash list cost ~500 KB and a copy of every swarm per request in production |
 | Logging | `debug` module (`DEBUG=wt-tracker:*`), off by default | logfmt events on stderr, `logLevel` (§13.8) | runtime errors, rejections and closes were silent |
 | Message rejected on another worker | (single tracker) | close 1008, like a local rejection | |
 | Slow receivers | uWS buffers up to its backpressure limit | messages beyond `maxBackpressure` (1 MiB) per connection are dropped | bounded memory |
 | Peer identity | global per tracker (per worker in multi-worker) | per shard | sharding |
-| Stop from another connection | allowed | allowed (parity) | hardening is planned (§12) |
+| Stop from another connection | removes the peer | no-op (§5.4) | hardening: peer_ids are public (offers carry them), so any client could remove other viewers |
 | SIGTERM / SIGINT | process exits at once, connections dropped | graceful shutdown: close 1001, up to `shutdownTimeout` (§13.6) | deployments (docker stop, systemd) |
-| Answer target not in the same swarm | allowed | allowed (parity) | hardening is planned (§12) |
+| Answer outside the rules of §5.3 (target or sender not in the answer's swarm, a sender of another connection, unknown target) | delivered to any known `to_peer_id`; unknown target → `TrackerError` → close | dropped, connection kept, `wt_dropped_answers_total` | hardening: no forged senders or answers into other swarms; dropping, not closing, because an answer can race a disconnect or a quality switch |
 
 ## 9. Testing requirements
 
@@ -362,7 +367,10 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 - `tests/announce.rs` and `tests/simulation.rs` port the JS tests and must keep passing.
 - `tests/behaviour.rs` must have at least one test per rule in §5 and per strategy in §5.2.
 - `tests/model.rs` compares random operation sequences against a naive model, for **every**
-  `OfferSelection` variant. New operations or semantics must be added to the model.
+  `OfferSelection` variant. New operations or semantics must be added to the model. It models
+  answers (§5.3) and stop ownership (§5.4); `model.proptest-regressions` keeps the shrunk
+  counterexamples of a run without those checks (a stop and an answer from another connection),
+  replayed before new cases.
 - Every public behaviour change must go through `check_invariants()` in tests.
 - `crates/wt-proto/tests` (each runs against **every** compiled-in backend; `cargo test
   --workspace` enables `sonic` through `wt-bench`):
@@ -380,12 +388,14 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   `numwant` form of §7.1, 0–12 offers (`offer_id` string / number / `null` / absent, `sdp` with
   CRLF, quotes, backslashes, U+2028, emoji, control characters, absent; array `offer`; extra
   members), answers (`answer` object / `null` / number, extra members, any member order,
-  unknown targets), stops, scrapes (all / one / array with non-strings / number), error frames
+  unknown targets, without `info_hash`, ~10% from another connection than the sender's), stops, scrapes (all / one / array with non-strings / number), error frames
   that both sides reject without a state change, disconnects, clock advances and expiry, with
   shuffled member order and ~6% non-canonical frames (whitespace, escaped spellings, duplicate
   members). JS runs each frame like `uws-tracker` (`JSON.parse` → `FastTracker` with fake clock,
   captured sweep and seeded `Math.random` → `JSON.stringify`; a `SyntaxError` / `TrackerError`
-  closes the connection → `disconnect`); Rust runs `wt-difftest` (`wt_proto::handle_with` +
+  closes the connection → `disconnect`; the deliberate answer rules of §5.3 are applied before
+  `FastTracker` sees an answer: no string `info_hash` → error, otherwise dropped unless sender and
+  target are members of the swarm and the sender is the connection's); Rust runs `wt-difftest` (`wt_proto::handle_with` +
   `Shard`, an error → `disconnect`) for **every** parser backend × `OfferSelection`. After every
   op it checks:
   - **equality JS ↔ Rust**: error flag, removed peers (as a set), full state (swarm → sorted
@@ -395,14 +405,15 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   - **the spec, on each side independently**: §5.1 reply; §5.2 offer count
     `n = min(others, offers, max_offers, numwant)` with exactly the first `n` payloads, receivers
     a sub-multiset of the other members' connections (all of them when `n == others`); §5.3 /
-    §7.2 answer routing and body (the frame minus `to_peer_id`) or error; §5.5 scrape files;
+    §7.2 answers delivered exactly when §5.3 allows them (from the previous state), with the body
+    (the frame minus `to_peer_id`), dropped otherwise, an error without `info_hash`; §5.5 scrape files;
     removed peers = peers that left the state or changed connection; expected errors; Rust
     `check_invariants()`.
 
 - `crates/wt-server/tests/server.rs` (in-process server, real sockets): offers and answers across
   workers and shards (byte-exact), scrape merged across shards in request order, disconnect
   cleanup across shards, bad / oversized / invalid-UTF-8 frames close and remove peers, binary,
-  fragmented and pipelined (same packet as the handshake) frames, the multi-shard answer rule,
+  fragmented and pipelined (same packet as the handshake) frames, an answer without `info_hash` rejected with 1 and 2 workers,
   idle timeout with pings, HTTP routes and ws path, origin rules, `maxConnections`, wss with a
   generated certificate, backpressure drops; `ConnId` packing unit test. Tests that need swarms
   spread over shards use `placement: "hash"`.
@@ -480,8 +491,9 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   `total`, `top=0` / default = all, `top=x` → 400, not on the public listener, its hex matching
   `?infoHash=`); connections counted by reason (`client_close`, `rejected`
   with `invalid_json`, `too_big`, `eof`, `bad_request`, `idle_timeout`); answers to an unknown
-  peer spread over 4 shards (`hash`) all close with 1008, local or remote rejection alike, and
-  count `unknown_peer`; no metrics listener unless configured. `tests/suite`: the exact
+  peer spread over 4 shards (`hash`, some dropped by a remote shard) are counted in
+  `wt_dropped_answers_total` and the connections stay open, while an answer without `info_hash`
+  closes with 1008 (`bad_field`); no metrics listener unless configured. `tests/suite`: the exact
   `/stats.json` keys, `?infoHash=` (unknown swarm, malformed → 400), `/metrics` only on its own
   listener, `wt_http_requests_total`. Unit tests: logfmt quoting, RFC 3339 timestamps, the rate
   limit, label uniqueness, metric text escaping, info_hash hex and query parsing. The test
@@ -510,7 +522,7 @@ and message counting. The tables check that both sides emit the same message cou
 | `reannounce` | every membership of `multi_peer_join` re-announces with 10 offers | announce |
 | `reannounce_one_swarm` | every peer of `join_one_swarm` re-announces with 10 offers | announce |
 | `*_window`, `*_round_robin` | the same, with the other `OfferSelection` (Rust only) | announce |
-| `answer` | 1M answers to pseudo-random known peers | answer |
+| `answer` | 1M answers between pseudo-random members of one swarm, each from the sender's connection (`answer_pair`: target `t`, swarm `mp_swarm(t, 0)`, sender `t + MP_SWARMS`), all delivered | answer |
 | `stop_all` | stop every membership of `multi_peer_join` | stop |
 | `disconnect_all` | disconnect all 100k conns of `multi_peer_join` | disconnect |
 | `expire_sweep` | `multi_peer_join` at t=0, even peers refreshed at t=30, sweep at t=45 | per membership scanned |
@@ -519,7 +531,7 @@ and message counting. The tables check that both sides emit the same message cou
 | `proto_parse_announce` | parse one of 1000 distinct ~14 KB announce frames (10 offers × 1.3 KB SDP from `bench/fixtures/offer.sdp`); JS: `StringDecoder` + `JSON.parse` like uws-tracker | parse |
 | `proto_encode_announce` | encode reply + 10 offers from a parsed announce; JS: FastTracker's reused objects + `JSON.stringify` | encode |
 | `pipeline_reannounce` | `multi_peer_join` state; frame → parse → shard → serialized messages (1000 distinct frames) | message |
-| `pipeline_answer` | answer with a 1.3 KB SDP to a pseudo-random known peer, full pipeline | message |
+| `pipeline_answer` | answer with a 1.3 KB SDP between members of one swarm (`answer_pair`), from the sender's connection, full pipeline | message |
 | `*_serde_json`, `*_sonic` | Rust protocol scenarios per parser backend; compared with the JS twin | |
 
 Protocol frames are built identically on both sides (ASCII), so the parsed / sent byte counts
@@ -531,7 +543,7 @@ overstates because freed pages are retained.
 ## 11. Performance results
 
 <!-- perf-tables:begin -->
-- Generated by `bench/run.sh` on 2026-10-02. Do not edit by hand.
+- Generated by `bench/run.sh` on 2026-10-05. Do not edit by hand.
 - Rust: {"arch":"aarch64","os":"macos","parallelism":8}
 - JS: {"node":"v26.3.0","cpu":"Apple M1","parallelism":8}
 - Median of 5 runs after 2 warmups. 10 offers per announce, numwant 10. Core scenarios count messages without serializing; `proto_*` / `pipeline_*` include JSON parsing and serialization (1.3 KB SDP per offer, ~14 KB per announce frame) and compare output bytes.
@@ -541,32 +553,32 @@ overstates because freed pages are retained.
 
 | Scenario | Ops/run | JS ns/op | Rust ns/op | Speedup | Same messages |
 |---|---:|---:|---:|---:|:-:|
-| join_one_swarm | 100,000 | 545.8 | 144.3 | 3.8× | yes |
-| join_many_swarms | 1,000,000 | 718.2 | 224.6 | 3.2× | yes |
-| multi_peer_join | 600,000 | 779.8 | 166.6 | 4.7× | yes |
-| reannounce | 600,000 | 796.8 | 137.3 | 5.8× | yes |
-| answer | 1,000,000 | 299.7 | 72.6 | 4.1× | yes |
-| reannounce_one_swarm | 100,000 | 273.0 | 103.3 | 2.6× | yes |
-| reannounce_window (vs JS reannounce) | 600,000 | 796.8 | 97.1 | 8.2× | n/a |
-| reannounce_one_swarm_window (vs JS reannounce_one_swarm) | 100,000 | 273.0 | 49.7 | 5.5× | n/a |
-| reannounce_round_robin (vs JS reannounce) | 600,000 | 796.8 | 87.0 | 9.2× | n/a |
-| reannounce_one_swarm_round_robin (vs JS reannounce_one_swarm) | 100,000 | 273.0 | 48.1 | 5.7× | n/a |
-| stop_all | 600,000 | 224.0 | 87.2 | 2.6× | yes |
-| disconnect_all | 100,000 | 801.5 | 233.3 | 3.4× | yes |
-| expire_sweep | 600,000 | 99.2 | 25.2 | 3.9× | yes |
-| proto_parse_announce_serde_json (vs JS proto_parse_announce) | 20,000 | 16411.7 | 6978.9 | 2.4× | yes |
-| proto_parse_announce_sonic (vs JS proto_parse_announce) | 20,000 | 16411.7 | 32381.5 | 0.5× | yes |
-| proto_encode_announce | 20,000 | 7411.4 | 1015.1 | 7.3× | yes |
-| pipeline_reannounce_serde_json (vs JS pipeline_reannounce) | 20,000 | 26540.0 | 8287.2 | 3.2× | yes |
-| pipeline_reannounce_sonic (vs JS pipeline_reannounce) | 20,000 | 26540.0 | 33791.4 | 0.8× | yes |
-| pipeline_answer_serde_json (vs JS pipeline_answer) | 20,000 | 3033.1 | 879.1 | 3.5× | yes |
-| pipeline_answer_sonic (vs JS pipeline_answer) | 20,000 | 3033.1 | 1100.0 | 2.8× | yes |
+| join_one_swarm | 100,000 | 547.0 | 122.2 | 4.5× | yes |
+| join_many_swarms | 1,000,000 | 719.7 | 213.5 | 3.4× | yes |
+| multi_peer_join | 600,000 | 765.8 | 151.7 | 5.0× | yes |
+| reannounce | 600,000 | 815.9 | 119.0 | 6.9× | yes |
+| answer | 1,000,000 | 478.6 | 135.4 | 3.5× | yes |
+| reannounce_one_swarm | 100,000 | 268.0 | 74.7 | 3.6× | yes |
+| reannounce_window (vs JS reannounce) | 600,000 | 815.9 | 95.7 | 8.5× | n/a |
+| reannounce_one_swarm_window (vs JS reannounce_one_swarm) | 100,000 | 268.0 | 47.4 | 5.7× | n/a |
+| reannounce_round_robin (vs JS reannounce) | 600,000 | 815.9 | 87.3 | 9.3× | n/a |
+| reannounce_one_swarm_round_robin (vs JS reannounce_one_swarm) | 100,000 | 268.0 | 45.0 | 6.0× | n/a |
+| stop_all | 600,000 | 214.4 | 88.6 | 2.4× | yes |
+| disconnect_all | 100,000 | 772.2 | 229.7 | 3.4× | yes |
+| expire_sweep | 600,000 | 98.1 | 25.6 | 3.8× | yes |
+| proto_parse_announce_serde_json (vs JS proto_parse_announce) | 20,000 | 16340.1 | 6861.7 | 2.4× | yes |
+| proto_parse_announce_sonic (vs JS proto_parse_announce) | 20,000 | 16340.1 | 32451.3 | 0.5× | yes |
+| proto_encode_announce | 20,000 | 7492.8 | 1017.1 | 7.4× | yes |
+| pipeline_reannounce_serde_json (vs JS pipeline_reannounce) | 20,000 | 26545.3 | 8134.9 | 3.3× | yes |
+| pipeline_reannounce_sonic (vs JS pipeline_reannounce) | 20,000 | 26545.3 | 33778.9 | 0.8× | yes |
+| pipeline_answer_serde_json (vs JS pipeline_answer) | 20,000 | 3040.4 | 936.4 | 3.2× | yes |
+| pipeline_answer_sonic (vs JS pipeline_answer) | 20,000 | 3040.4 | 1168.8 | 2.6× | yes |
 
 ### Memory per membership (peer-in-swarm)
 
 | State | Memberships | JS heapUsed B | Rust heap B (incl. Vec slack) | Rust RSS B |
 |---|---:|---:|---:|---:|
-| multi_peer_join | 600,000 | 156.7 | 152.5 | 92.4 |
+| multi_peer_join | 600,000 | 156.7 | 152.5 | 93.1 |
 | join_many_swarms | 1,000,000 | 233.6 | 233.9 | 282.2 |
 
 ### Multi-core scaling (re-announce, M announces/s)
@@ -575,44 +587,44 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
 
 | Threads | JS strong | Rust strong | Rust/JS | JS weak | Rust weak |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 1.88 (1.0×) | 7.15 (1.0×) | 3.8× | 1.73 (1.0×) | 6.89 (1.0×) |
-| 2 | 2.15 (1.1×) | 9.52 (1.3×) | 4.4× | 2.76 (1.6×) | 9.54 (1.4×) |
-| 4 | 3.34 (1.8×) | 17.34 (2.4×) | 5.2× | 3.71 (2.1×) | 14.58 (2.1×) |
-| 8 | 4.23 (2.3×) | 29.20 (4.1×) | 6.9× | 4.81 (2.8×) | 19.69 (2.9×) |
+| 1 | 1.92 (1.0×) | 6.99 (1.0×) | 3.6× | 1.74 (1.0×) | 7.13 (1.0×) |
+| 2 | 2.08 (1.1×) | 9.57 (1.4×) | 4.6× | 2.51 (1.4×) | 10.03 (1.4×) |
+| 4 | 3.69 (1.9×) | 17.68 (2.5×) | 4.8× | 3.65 (2.1×) | 15.23 (2.1×) |
+| 8 | 4.29 (2.2×) | 27.64 (4.0×) | 6.4× | 4.70 (2.7×) | 20.19 (2.8×) |
 
 ### Load test (end to end, `loadtest/run.sh`)
 
 - {"cpu":"Apple M1","cores":8,"os":"darwin 27.0.0","node":"v26.3.0"}; client and server on the same machine.
-- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. Servers with `compression: 0` except in the deflate profile (the tungstenite client does not offer permessage-deflate anyway). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers, `rust-n-hash` = all-core workers with `placement: "hash"`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Profile deflate: like light, but clients offer permessage-deflate and compress everything they send; servers with `compression: 1` (Rust compressing outgoing messages ≥ 1 KiB, the default; `rust-n-in`: `compressOutgoingMinSize: 0`, inflating only, like JS; `rust-n-off`: `compression: 0`, the uncompressed baseline). The deflate rows in the table below predate the 1 KiB default: there `rust-1` / `rust-n` inflated only and `rust-n-out` compressed ≥ 1 KiB. Wire = bytes on the client sockets (own client, deflate profile only). Local % = requests applied on the connection's own worker (Rust).
+- 100 swarms, 10 offers per announce (1.3 KB SDP), every offer answered, 15 s steady phase. Servers with `compression: 0` except in the deflate profile (the tungstenite client does not offer permessage-deflate anyway). `js-workers` = JS multi-worker tracker, `rust-1` / `rust-n` = 1 / all-core workers, `rust-n-hash` = all-core workers with `placement: "hash"`. Profile media: 2 swarms per connection (video + audio), video quality switch every 10 s among 4. Profile deflate: like light, but clients offer permessage-deflate and compress everything they send; servers with `compression: 1` (Rust compressing outgoing messages ≥ 1 KiB, the default; `rust-n-in`: `compressOutgoingMinSize: 0`, inflating only, like JS; `rust-n-off`: `compression: 0`, the uncompressed baseline). Wire = bytes on the client sockets (own client, deflate profile only). Local % = requests applied on the connection's own worker (Rust).
 - Wire smoke check (same messages from JS and Rust): **yes**.
 
 | Profile / target | Conns (connected) | Announce every | Errors | Msgs/s (in + out) | Server CPU (cores) | CPU µs / msg | RSS MiB (idle) | RSS KiB / conn (above idle) | RTT p50 / p99 ms | Local % | Wire KiB/s server out / in |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| light js ws | 3000 (3000) | 5 s | 0 | 19,206 | 0.33 | 17.0 | 79.5 (94.2) | 27.1 (0.0) | 0.47 / 2.38 | – | – |
-| light js wss | 3000 (3000) | 5 s | 0 | 19,209 | 0.35 | 18.1 | 74.9 (93.2) | 25.6 (0.0) | 0.50 / 1.81 | – | – |
-| light js-workers ws | 3000 (2958) | 5 s | 42 | 18,937 | 0.56 | 29.4 | 187.2 (207.4) | 64.8 (0.0) | 0.36 / 1.25 | – | – |
-| light js-workers wss | 3000 (2897) | 5 s | 103 | 18,546 | 0.55 | 29.9 | 176.9 (211.0) | 62.5 (0.0) | 0.39 / 2.62 | – | – |
-| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,206 | 0.21 | 10.8 | 16.3 (3.1) | 5.6 (4.5) | 0.23 / 1.27 | 100.0 | – |
-| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,217 | 0.32 | 16.7 | 27.2 (3.1) | 9.3 (8.2) | 0.33 / 1.73 | 100.0 | – |
-| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,216 | 0.23 | 12.2 | 17.9 (3.6) | 6.1 (4.9) | 0.25 / 16.80 | 100.0 | – |
-| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,213 | 0.27 | 13.9 | 27.7 (3.6) | 9.4 (8.2) | 0.27 / 1.40 | 100.0 | – |
-| light rust-n-hash ws | 3000 (3000) | 5 s | 0 | 19,210 | 0.45 | 23.4 | 19.3 (3.6) | 6.6 (5.4) | 0.39 / 1.60 | 11.5 | – |
-| light rust-n-hash wss | 3000 (3000) | 5 s | 0 | 19,211 | 0.45 | 23.2 | 37.9 (3.6) | 12.9 (11.7) | 0.40 / 1.55 | 11.1 | – |
-| heavy js ws | 4000 (4000) | 1 s | 0 | 128,040 | 0.68 | 5.3 | 74.5 (94.5) | 19.1 (0.0) | 0.51 / 1.48 | – | – |
-| heavy js-workers ws | 4000 (3956) | 1 s | 44 | 126,185 | 1.23 | 9.7 | 342.3 (207.6) | 88.6 (34.9) | 280.06 / 737.28 | – | – |
-| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 128,050 | 0.55 | 4.3 | 26.3 (3.1) | 6.7 (5.9) | 0.32 / 1.55 | 100.0 | – |
-| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,085 | 0.70 | 5.4 | 28.4 (3.6) | 7.3 (6.4) | 0.30 / 1.69 | 100.0 | – |
-| heavy rust-n-hash ws | 4000 (4000) | 1 s | 0 | 128,100 | 1.54 | 12.0 | 29.6 (3.6) | 7.6 (6.7) | 0.50 / 2.01 | 12.1 | – |
-| media js ws | 3000 (3000) | 5 s | 0 | 46,631 | 0.54 | 11.6 | 100.0 (94.0) | 34.1 (2.0) | 0.67 / 2.15 | – | – |
-| media js-workers ws | 3000 (2984) | 5 s | 16 | 46,362 | 0.91 | 19.6 | 289.8 (189.0) | 99.4 (34.6) | 0.63 / 2.04 | – | – |
-| media rust-1 ws | 3000 (3000) | 5 s | 0 | 46,630 | 0.42 | 9.1 | 22.7 (3.1) | 7.7 (6.7) | 0.36 / 2.06 | 100.0 | – |
-| media rust-n ws | 3000 (3000) | 5 s | 0 | 46,619 | 0.38 | 8.1 | 20.9 (3.6) | 7.1 (5.9) | 0.29 / 2.75 | 100.0 | – |
-| media rust-n-hash ws | 3000 (3000) | 5 s | 41 | 43,895 | 0.39 | 8.9 | 70.1 (3.6) | 23.9 (22.7) | 12.25 / 972.80 | 13.7 | – |
-| deflate js ws | 3000 (3000) | 5 s | 0 | 19,272 | 0.29 | 14.9 | 22.4 (93.9) | 7.7 (0.0) | 0.62 / 32.38 | – | 18,168 / 4,683 |
-| deflate rust-1 ws | 3000 (3000) | 5 s | 0 | 19,208 | 0.25 | 13.2 | 14.8 (3.1) | 5.0 (4.0) | 0.28 / 1.48 | 100.0 | 18,091 / 4,674 |
-| deflate rust-n ws | 3000 (3000) | 5 s | 0 | 19,207 | 0.24 | 12.4 | 15.2 (3.6) | 5.2 (4.0) | 0.24 / 1.25 | 100.0 | 18,090 / 4,674 |
-| deflate rust-n-off ws | 3000 (3000) | 5 s | 0 | 19,215 | 0.22 | 11.4 | 15.0 (3.6) | 5.1 (3.9) | 0.25 / 1.49 | 100.0 | 18,097 / 17,809 |
-| deflate rust-n-out ws | 3000 (3000) | 5 s | 0 | 19,205 | 0.38 | 19.8 | 18.3 (3.6) | 6.3 (5.0) | 0.23 / 1.78 | 100.0 | 10,416 / 4,674 |
+| light js ws | 3000 (3000) | 5 s | 0 | 19,209 | 0.33 | 17.2 | 105.7 (94.2) | 36.1 (3.9) | 0.47 / 2.06 | – | – |
+| light js wss | 3000 (3000) | 5 s | 0 | 19,207 | 0.38 | 19.7 | 115.8 (93.6) | 39.5 (7.6) | 0.52 / 1.89 | – | – |
+| light js-workers ws | 3000 (2986) | 5 s | 14 | 19,119 | 0.75 | 39.2 | 266.7 (207.1) | 91.5 (20.5) | 0.47 / 1.45 | – | – |
+| light js-workers wss | 3000 (2947) | 5 s | 53 | 18,866 | 0.75 | 40.0 | 523.8 (178.7) | 182.0 (119.9) | 0.49 / 2.27 | – | – |
+| light rust-1 ws | 3000 (3000) | 5 s | 0 | 19,209 | 0.28 | 14.5 | 15.6 (3.3) | 5.3 (4.2) | 0.28 / 1.58 | 100.0 | – |
+| light rust-1 wss | 3000 (3000) | 5 s | 0 | 19,215 | 0.35 | 18.1 | 32.2 (3.3) | 11.0 (9.9) | 0.34 / 1.64 | 100.0 | – |
+| light rust-n ws | 3000 (3000) | 5 s | 0 | 19,212 | 0.24 | 12.4 | 17.2 (3.8) | 5.9 (4.6) | 0.26 / 5.08 | 100.0 | – |
+| light rust-n wss | 3000 (3000) | 5 s | 0 | 19,210 | 0.29 | 15.2 | 36.8 (3.8) | 12.6 (11.3) | 0.28 / 1.53 | 100.0 | – |
+| light rust-n-hash ws | 3000 (3000) | 5 s | 0 | 19,207 | 0.47 | 24.7 | 19.4 (3.8) | 6.6 (5.4) | 0.39 / 1.48 | 12.6 | – |
+| light rust-n-hash wss | 3000 (3000) | 5 s | 0 | 19,211 | 0.46 | 24.1 | 37.8 (3.8) | 12.9 (11.6) | 0.39 / 1.37 | 12.3 | – |
+| heavy js ws | 4000 (4000) | 1 s | 0 | 128,060 | 0.68 | 5.3 | 108.0 (94.5) | 27.6 (3.5) | 0.50 / 1.40 | – | – |
+| heavy js-workers ws | 4000 (3933) | 1 s | 67 | 127,022 | 1.22 | 9.6 | 321.1 (199.2) | 83.6 (31.7) | 315.90 / 798.21 | – | – |
+| heavy rust-1 ws | 4000 (4000) | 1 s | 0 | 128,061 | 0.48 | 3.7 | 26.5 (3.3) | 6.8 (5.9) | 0.28 / 1.55 | 100.0 | – |
+| heavy rust-n ws | 4000 (4000) | 1 s | 0 | 128,048 | 0.60 | 4.7 | 28.0 (3.8) | 7.2 (6.2) | 0.29 / 1.70 | 100.0 | – |
+| heavy rust-n-hash ws | 4000 (4000) | 1 s | 0 | 128,044 | 1.28 | 10.0 | 32.4 (3.8) | 8.3 (7.3) | 0.44 / 1.83 | 13.4 | – |
+| media js ws | 3000 (3000) | 5 s | 0 | 46,626 | 0.46 | 9.8 | 106.1 (93.5) | 36.2 (4.3) | 0.65 / 2.24 | – | – |
+| media js-workers ws | 3000 (2939) | 5 s | 61 | 45,638 | 0.87 | 19.0 | 483.5 (190.2) | 168.5 (102.2) | 0.60 / 1.94 | – | – |
+| media rust-1 ws | 3000 (3000) | 5 s | 0 | 46,625 | 0.37 | 7.9 | 20.3 (3.3) | 6.9 (5.8) | 0.38 / 1.95 | 100.0 | – |
+| media rust-n ws | 3000 (3000) | 5 s | 0 | 46,623 | 0.47 | 10.1 | 21.0 (3.8) | 7.2 (5.9) | 0.35 / 2.00 | 100.0 | – |
+| media rust-n-hash ws | 3000 (3000) | 5 s | 0 | 46,635 | 0.91 | 19.5 | 24.4 (3.8) | 8.3 (7.0) | 0.48 / 2.09 | 13.4 | – |
+| deflate js ws | 3000 (3000) | 5 s | 0 | 19,211 | 0.43 | 22.2 | 105.0 (93.4) | 35.9 (4.0) | 0.52 / 1.50 | – | 18,094 / 4,675 |
+| deflate rust-1 ws | 3000 (3000) | 5 s | 0 | 19,211 | 0.45 | 23.6 | 19.2 (3.3) | 6.5 (5.4) | 0.28 / 1.18 | 100.0 | 10,420 / 4,675 |
+| deflate rust-n ws | 3000 (3000) | 5 s | 0 | 19,206 | 0.49 | 25.4 | 22.3 (3.8) | 7.6 (6.3) | 0.27 / 1.05 | 100.0 | 10,417 / 4,674 |
+| deflate rust-n-in ws | 3000 (3000) | 5 s | 0 | 19,208 | 0.34 | 17.9 | 19.3 (3.8) | 6.6 (5.3) | 0.34 / 1.08 | 100.0 | 18,091 / 4,674 |
+| deflate rust-n-off ws | 3000 (3000) | 5 s | 0 | 19,211 | 0.24 | 12.6 | 18.6 (3.8) | 6.4 (5.1) | 0.26 / 1.66 | 100.0 | 18,094 / 17,806 |
 
 ### Load test vs aquatic_ws (Linux container, `loadtest/aquatic.sh`)
 
@@ -747,8 +759,9 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   the listening sockets while the old one drains).
 - **Fuzzing, longer (planned):** the targets are libFuzzer / OSS-Fuzz compatible; longer runs
   than the nightly 20 min per target, e.g. through OSS-Fuzz.
-- Hardening: check the requesting connection on stop; optionally require the answer target to
-  share the swarm.
+- **Hardening (done, §5.3, §5.4):** a stop from another connection is a no-op; answers are
+  delivered only between members of their swarm from a peer of the sending connection (else
+  dropped and counted); an answer needs a string `info_hash`.
 
 ## 13. Server (`crates/wt-server`, binary `wt-tracker`)
 
@@ -909,8 +922,8 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
     `h` on stop / answer / scrape → the local shard; no swarm exists anywhere, same outcome);
     local shard → applied directly; otherwise sent as an `OwnedMessage` (one copy of the frame
     + offsets, no re-parse);
-  - a stop whose ids cannot match → nothing; an answer without a usable `info_hash` → local shard
-    if N = 1, else `BadField("info_hash")`;
+  - a stop whose ids cannot match → nothing; an answer whose `info_hash` cannot be a key → the
+    local shard, which drops it (§5.3);
   - scrape of all / several hashes → gathered (§13.4).
 - The owning shard's output is encoded once per batch (`Encoder::take`): each message is a slice
   of one buffer, delivered to its connection's queue (local) or batched per destination worker
@@ -995,7 +1008,8 @@ the hot path) and gathered as in §13.4. Families:
 | `wt_listener_connections` | gauge | `listener` | open WebSockets per listener (`host:port`) |
 | `wt_received_messages_total`, `wt_received_bytes_total` | counter | worker, `kind` | `announce`, `answer`, `stop`, `scrape`, `invalid` (not parsed); JSON bytes after inflating, counted once by the handling worker |
 | `wt_sent_messages_total`, `wt_sent_bytes_total` | counter | worker, `kind` | `announce_reply`, `offer`, `answer`, `scrape`; JSON bytes before framing and compression, counted by the producing shard |
-| `wt_rejected_messages_total` | counter | worker, `reason` | `invalid_json`, `not_an_object`, `unknown_action`, `unknown_event`, `bad_field`, `key_too_long`, `unknown_peer` (from `ProtoError` / `TrackerError`; counted by the rejecting worker) |
+| `wt_rejected_messages_total` | counter | worker, `reason` | `invalid_json`, `not_an_object`, `unknown_action`, `unknown_event`, `bad_field`, `key_too_long` (from `ProtoError` / `TrackerError`; counted by the rejecting worker) |
+| `wt_dropped_answers_total` | counter | worker | answers not delivered (§5.3), counted by the shard that dropped them |
 | `wt_closed_connections_total` | counter | worker, `reason` | WebSocket: `client_close` (close frame from the client), `idle_timeout`, `protocol_error` (1002), `too_big` (1009), `invalid_data` (1007), `rejected` (1008), `server_close` (1000 from the server), `shutdown` (1001), `eof`, `socket_error`; before the upgrade: `tls_handshake` (failed or > 10 s), `bad_request` (no valid head within 10 s), `max_connections`, `origin_denied`, `bad_upgrade` (e.g. no `Sec-WebSocket-Key`). Counted by the worker holding the connection when it ends; HTTP requests are in `wt_http_requests_total` |
 | `wt_http_requests_total` | counter | worker, `route` | `stats`, `index`, `not_found` |
 | `wt_socket_bytes_total` | counter | worker, `direction` | `in`, `out`: socket bytes, TLS and the HTTP upgrade included |

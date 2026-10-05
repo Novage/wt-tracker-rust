@@ -120,45 +120,54 @@ async fn connections_are_counted_by_why_they_ended() {
     assert!(m.has("wt_build_info") && m.has("process_start_time_seconds"));
 }
 
-/// A rejected message closes its connection with 1008, also when another worker's shard
-/// rejected it (spec §13.2): answers to an unknown peer, spread over 4 shards by hash.
+/// Spec §5.3: answers that may not be delivered (here: to an unknown peer, spread over 4 shards
+/// by hash) are dropped and counted; the connections stay open. A malformed answer (no
+/// `info_hash`) closes its connection with 1008.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_message_rejected_on_any_shard_closes_with_policy_violation() {
+async fn undeliverable_answers_are_dropped_and_malformed_ones_rejected() {
     let server = hashed(4);
     let mut clients = Vec::new();
     for i in 0..12 {
+        let info_hash = format!("hdrop{i:015}");
         let mut ws = connect(&server).await;
+        send(&mut ws, &announce(&info_hash, &format!("p{i}"), 0)).await;
+        recv(&mut ws).await.unwrap();
         send(
             &mut ws,
             &format!(
-                r#"{{"action":"announce","info_hash":"hreject{i:013}","peer_id":"p{i}","to_peer_id":"ghost","answer":{{"type":"answer","sdp":"y"}},"offer_id":"o"}}"#
+                r#"{{"action":"announce","info_hash":"{info_hash}","peer_id":"p{i}","to_peer_id":"ghost","answer":{{"type":"answer","sdp":"y"}},"offer_id":"o"}}"#
             ),
         )
         .await;
         clients.push(ws);
     }
+    wait_metric(&server, "wt_dropped_answers_total", &[], 12).await;
+    // Still connected: a scrape is answered.
     for ws in &mut clients {
-        assert_eq!(close_code(ws).await, Some(CloseCode::Policy));
+        send(ws, r#"{"action":"scrape"}"#).await;
+        assert!(recv(ws).await.unwrap().starts_with(r#"{"action":"scrape""#));
     }
+    let m = metrics(&server).await;
+    assert_eq!(m.sum("wt_rejected_messages_total", &[]), 0);
+    assert!(
+        m.sum("wt_routed_requests_total", &[("target", "remote")]) > 0,
+        "some answers were dropped by another worker's shard"
+    );
+
+    let mut malformed = connect(&server).await;
+    send(
+        &mut malformed,
+        r#"{"action":"announce","peer_id":"p0","to_peer_id":"p1","answer":{}}"#,
+    )
+    .await;
+    assert_eq!(close_code(&mut malformed).await, Some(CloseCode::Policy));
     wait_metric(
         &server,
         "wt_rejected_messages_total",
-        &[("reason", "unknown_peer")],
-        12,
+        &[("reason", "bad_field")],
+        1,
     )
     .await;
-    wait_metric(
-        &server,
-        "wt_closed_connections_total",
-        &[("reason", "rejected")],
-        12,
-    )
-    .await;
-    // Some of them were rejected by a remote shard.
-    let remote = metrics(&server)
-        .await
-        .sum("wt_routed_requests_total", &[("target", "remote")]);
-    assert!(remote > 0, "every answer stayed local");
 }
 
 #[tokio::test(flavor = "multi_thread")]
