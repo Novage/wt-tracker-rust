@@ -144,6 +144,56 @@ pub async fn http_get(addr: SocketAddr, path: &str) -> (String, String) {
     (head.lines().next().unwrap().to_string(), body.to_string())
 }
 
+/// A GET with extra header lines (each ending in `\r\n`) over plain HTTP: the status line, the
+/// header lines and the body.
+pub async fn http_get_with(
+    addr: SocketAddr,
+    path: &str,
+    headers: &str,
+) -> (String, String, String) {
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n{headers}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    tcp.read_to_string(&mut response).await.unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let (status, header_lines) = head.split_once("\r\n").unwrap_or((head, ""));
+    (status.into(), header_lines.into(), body.into())
+}
+
+/// `Authorization: Basic …` header line for `user:password`.
+pub fn basic_auth(user: &str, password: &str) -> String {
+    use base64::Engine;
+    let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+    format!("Authorization: Basic {token}\r\n")
+}
+
+/// A GET over HTTPS (blocking rustls): the status line, the body and the leaf certificate the
+/// server sent.
+pub fn https_get(
+    addr: SocketAddr,
+    config: &std::sync::Arc<rustls::ClientConfig>,
+    path: &str,
+    headers: &str,
+) -> (String, String, Vec<u8>) {
+    use std::io::{Read, Write};
+    let conn =
+        rustls::ClientConnection::new(config.clone(), "localhost".try_into().unwrap()).unwrap();
+    let tcp = std::net::TcpStream::connect(addr).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+    tls.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n{headers}\r\n").as_bytes())
+        .unwrap();
+    let mut response = Vec::new();
+    // The server closes after the response (close_notify, or EOF).
+    let _ = tls.read_to_end(&mut response);
+    let leaf = tls.conn.peer_certificates().unwrap()[0].to_vec();
+    let response = String::from_utf8(response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    (head.lines().next().unwrap().into(), body.into(), leaf)
+}
+
 pub async fn stats(server: &Server) -> serde_json::Value {
     let (status, body) = http_get(server.local_addrs()[0], "/stats.json").await;
     assert_eq!(status, "HTTP/1.1 200 OK");

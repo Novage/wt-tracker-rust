@@ -237,3 +237,170 @@ async fn swarms_lists_the_largest_swarms_of_all_shards() {
     );
     drop(keep);
 }
+
+/// Spec §13.7: basic auth on every route of the metrics listener (`/metrics`, `/swarms`,
+/// `/stats.json`); 401 with a `WWW-Authenticate` challenge otherwise.
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_listener_basic_auth() {
+    let server = start(
+        r#"{"servers":[{"server":{"host":"127.0.0.1","port":0}}],"workers":2,
+            "metrics":{"host":"127.0.0.1","port":0,"username":"grafana","password":"s3cret"}}"#,
+    );
+    let addr = server.metrics_addr().unwrap();
+    for path in ["/metrics", "/swarms", "/stats.json"] {
+        for headers in [
+            String::new(),
+            basic_auth("grafana", "wrong"),
+            basic_auth("other", "s3cret"),
+            "Authorization: Bearer s3cret\r\n".into(),
+        ] {
+            let (status, header_lines, _) = http_get_with(addr, path, &headers).await;
+            assert_eq!(status, "HTTP/1.1 401 Unauthorized", "{path} {headers:?}");
+            assert!(
+                header_lines.contains("WWW-Authenticate: Basic realm=\"wt-tracker\""),
+                "{header_lines}"
+            );
+        }
+        let (status, _, body) = http_get_with(addr, path, &basic_auth("grafana", "s3cret")).await;
+        assert_eq!(status, "HTTP/1.1 200 OK", "{path}: {body}");
+    }
+    // The metrics listener's /stats.json is the public one.
+    let (_, _, body) = http_get_with(addr, "/stats.json", &basic_auth("grafana", "s3cret")).await;
+    let private: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let public = stats(&server).await;
+    let keys =
+        |v: &serde_json::Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
+    assert_eq!(keys(&private), keys(&public));
+    // The public listener needs no password.
+    assert_eq!(
+        http_get(server.local_addrs()[0], "/stats.json").await.0,
+        "HTTP/1.1 200 OK"
+    );
+}
+
+/// Spec §13.7: an HTTPS metrics listener with basic auth; its certificate reloads with the
+/// others (`Server::reload_tls`, SIGHUP) and shows in `wt_tls_certificate_expiry_seconds`. Also
+/// checks that every metric the Grafana dashboard and the alert rules in `monitoring/` use is
+/// exported, so they cannot drift from `/metrics`.
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_listener_https_reloads_and_serves_the_monitoring_kit() {
+    use std::sync::Arc;
+
+    let certs: Vec<_> = (0..2)
+        .map(|_| rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap())
+        .collect();
+    let dir = std::env::temp_dir().join(format!("wt-metrics-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert_file, key_file) = (dir.join("cert.pem"), dir.join("key.pem"));
+    let write = {
+        let (cert_file, key_file) = (cert_file.clone(), key_file.clone());
+        let pems: Vec<(String, String)> = certs
+            .iter()
+            .map(|c| (c.cert.pem(), c.signing_key.serialize_pem()))
+            .collect();
+        move |i: usize| {
+            std::fs::write(&cert_file, &pems[i].0).unwrap();
+            std::fs::write(&key_file, &pems[i].1).unwrap();
+        }
+    };
+    write(0);
+    let server = Arc::new(start(&format!(
+        r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0}}}}],"workers":2,
+            "metrics":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{},
+                        "username":"grafana","password":"s3cret"}}}}"#,
+        serde_json::to_string(&cert_file).unwrap(),
+        serde_json::to_string(&key_file).unwrap()
+    )));
+    let addr = server.metrics_addr().unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    for c in &certs {
+        roots.add(c.cert.der().clone()).unwrap();
+    }
+    let client = tls_client(&roots);
+    let auth = basic_auth("grafana", "s3cret");
+
+    // Plain HTTP to the HTTPS port gets no HTTP response.
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut reply = Vec::new();
+    let _ = tokio::time::timeout(
+        WAIT,
+        tokio::io::AsyncReadExt::read_to_end(&mut tcp, &mut reply),
+    )
+    .await;
+    assert!(!reply.starts_with(b"HTTP/"), "{reply:?}");
+
+    let (body, metrics_text) = {
+        let (server, client, auth, roots) =
+            (server.clone(), client.clone(), auth.clone(), roots.clone());
+        let der: Vec<Vec<u8>> = certs.iter().map(|c| c.cert.der().to_vec()).collect();
+        tokio::task::spawn_blocking(move || {
+            let (status, _, leaf) = https_get(addr, &client, "/stats.json", "");
+            assert_eq!(status, "HTTP/1.1 401 Unauthorized");
+            assert_eq!(leaf, der[0]);
+            let (status, swarms, _) = https_get(addr, &client, "/swarms", &auth);
+            assert_eq!(status, "HTTP/1.1 200 OK", "{swarms}");
+            let (status, body, _) = https_get(addr, &client, "/stats.json", &auth);
+            assert_eq!(status, "HTTP/1.1 200 OK");
+
+            // The metrics listener's certificate reloads with the others.
+            write(1);
+            let results = server.reload_tls();
+            assert_eq!(results.len(), 1, "{results:?}");
+            assert_eq!(results[0].0, "127.0.0.1:0");
+            assert!(matches!(results[0].1, wt_server::Reload::Reloaded { .. }));
+            // A fresh client: a resumed session would report the certificate it began with.
+            let (status, metrics_text, leaf) =
+                https_get(addr, &tls_client(&roots), "/metrics", &auth);
+            assert_eq!(status, "HTTP/1.1 200 OK");
+            assert_eq!(leaf, der[1]);
+            (body, metrics_text)
+        })
+        .await
+        .unwrap()
+    };
+    assert!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["peersCount"].is_u64());
+    assert!(
+        metrics_text.contains("wt_tls_certificate_expiry_seconds{listener=\"127.0.0.1:0\"}"),
+        "{metrics_text}"
+    );
+
+    // Every metric name in the monitoring kit is exported (Linux-only ones on Linux).
+    let linux_only = [
+        "process_cpu_seconds_total",
+        "process_open_fds",
+        "process_max_fds",
+        "wt_worker_cpu_seconds_total",
+        "wt_tcp_listen_overflows_total",
+    ];
+    let exported = |name: &str| {
+        metrics_text
+            .lines()
+            .any(|l| l.starts_with(&format!("{name}{{")) || l.starts_with(&format!("{name} ")))
+    };
+    let kit = [
+        include_str!("../../../monitoring/grafana-dashboard.json"),
+        include_str!("../../../monitoring/alerts.yaml"),
+    ];
+    let mut names: Vec<&str> = kit
+        .iter()
+        .flat_map(|text| {
+            text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| w.starts_with("wt_") || w.starts_with("process_"))
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    assert!(names.len() > 15, "{names:?}");
+    for name in names {
+        if cfg!(target_os = "linux") || !linux_only.contains(&name) {
+            assert!(
+                exported(name),
+                "{name} is used by monitoring/ but not in /metrics"
+            );
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

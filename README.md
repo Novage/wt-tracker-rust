@@ -6,8 +6,10 @@ A multi-core [WebTorrent](https://webtorrent.io/) tracker in Rust: a port of
 
 - **Drop-in for the JS tracker:** same `config.json` format, same wire protocol (replies are
   byte-identical to the JS tracker's, checked by a differential test).
-- **Observable:** Prometheus `/metrics` on a private listener (traffic, compression, closes by
-  reason, rejected messages by reason, per worker) and logfmt logs on stderr.
+- **Observable:** Prometheus `/metrics` on a separate listener, optionally HTTPS with a password
+  (traffic, compression, closes and rejected messages by reason, CPU per worker, per worker),
+  logfmt logs on stderr, and a ready Grafana dashboard with alert rules in
+  [`monitoring/`](monitoring/README.md) (free with Grafana Cloud).
 - **Multi-core without cross-thread traffic:** one tracker shard per core. The swarms of one piece
   of content (video, audio, every quality) share a shard, and a connection moves to that shard at
   its first announce, so its requests are handled on one core.
@@ -18,9 +20,10 @@ A multi-core [WebTorrent](https://webtorrent.io/) tracker in Rust: a port of
 - **Low memory:** 5–8 KiB per connection under load (about 9 KiB with TLS), against 19–34 KiB
   for the JS tracker.
 
-**Status:** under active development. The protocol and tracker behaviour are complete and
-tested; the server has not yet run in production. Open items are listed in
-[§12 of the specification](docs/SPEC.md#12-open-items).
+**Status:** in production since October 2026 at `wss://tracker.novage.com.ua` (Oracle Cloud
+Ampere A1, 2 cores, Always Free), with up to 51k concurrent peers so far. A rare bug where a worker
+thread gets stuck at 100% CPU is under investigation. Development continues; open items are listed
+in [§12 of the specification](docs/SPEC.md#12-open-items).
 
 ## Performance
 
@@ -93,7 +96,7 @@ Settings this server adds (all optional):
 | `indexHtml` | `./index.html` if present | page served at `GET /` |
 | `shutdownTimeout` | `5` | seconds to wait for connections to close on SIGTERM / SIGINT |
 | `logLevel` | `info` | `error`, `warn`, `info` or `debug` (every connection close with its reason) |
-| `metrics` | off | `{"host": "127.0.0.1", "port": 9100}`: private plain HTTP listener for Prometheus `GET /metrics` and `GET /swarms` |
+| `metrics` | off | `{"host": "127.0.0.1", "port": 9100}`: listener for Prometheus `GET /metrics`, `GET /swarms` and `GET /stats.json`; add `cert_file_name` + `key_file_name` for HTTPS and `username` + `password` for basic auth |
 | `websockets.compressOutgoingMinSize` | `1024` | with permessage-deflate, compress outgoing messages at least this long (0 = never, like the JS tracker) |
 | `tracker.offerSelection` | `sample` | how offers pick peers: `sample`, `window` or `round_robin` |
 
@@ -104,8 +107,10 @@ HTTP routes: the WebSocket upgrade on `websockets.path`, `GET /stats.json` (torr
 connections per listener, memory, workers, uptime; `?infoHash=<hex>` for one swarm) and `GET /`.
 With `metrics` set, `GET /metrics` on that listener: Prometheus metrics per worker (messages and
 bytes sent / received per kind, rejected messages and closed connections by reason, socket and
-compression bytes, placement counters), and `GET /swarms?top=100`: the largest swarms with
-their hex info_hash, peers and worker ([spec §13.7](docs/SPEC.md#137-metrics-and-swarms)).
+compression bytes, placement counters, process and per-worker CPU, file descriptors), `GET
+/swarms?top=100`: the largest swarms with their hex info_hash, peers and worker, and `GET
+/stats.json` ([spec §13.7](docs/SPEC.md#137-metrics-and-swarms)). Dashboard, alerts and setup:
+[`monitoring/`](monitoring/README.md).
 
 Logs: one logfmt line per event on stderr, e.g. `level=info event=listening addr=0.0.0.0:443`
 (no timestamp under systemd / journald; [spec §13.8](docs/SPEC.md#138-logging)).

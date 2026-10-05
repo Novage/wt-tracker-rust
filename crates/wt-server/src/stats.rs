@@ -6,7 +6,27 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use serde_json::{Value, json};
 
+use crate::http;
 use crate::worker::Worker;
+
+/// The `/stats.json` response for a request's query string: the summary, or one swarm with
+/// `infoHash` (`400` if it is not hex). Public and metrics listeners alike.
+pub(crate) async fn response(me: &Rc<Worker>, query: &str) -> Vec<u8> {
+    match query_param(query, "infoHash") {
+        None => {
+            let body = json(me).await;
+            http::response("200 OK", Some("application/json"), body.as_bytes())
+        }
+        Some(hex) => match swarm_json(me, hex).await {
+            Some(body) => http::response("200 OK", Some("application/json"), body.as_bytes()),
+            None => http::response(
+                "400 Bad Request",
+                None,
+                b"infoHash must be 2 to 80 hex digits",
+            ),
+        },
+    }
+}
 
 /// The summary: torrents, peers, connections per listener, memory, workers, uptime.
 pub(crate) async fn json(me: &Rc<Worker>) -> String {

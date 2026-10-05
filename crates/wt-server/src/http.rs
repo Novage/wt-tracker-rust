@@ -23,6 +23,8 @@ pub struct Head {
     /// Every `Sec-WebSocket-Extensions` line, joined by `, `.
     pub websocket_extensions: Option<String>,
     pub origin: Option<String>,
+    /// `Authorization` (metrics listener basic auth).
+    pub authorization: Option<String>,
 }
 
 /// Parses a complete request head at the start of `buf`: the head and its length, or `None` if
@@ -53,6 +55,8 @@ pub fn parse_head(buf: &[u8]) -> io::Result<Option<(Head, usize)>> {
                     });
                 } else if h.name.eq_ignore_ascii_case("origin") {
                     head.origin = Some(value());
+                } else if h.name.eq_ignore_ascii_case("authorization") {
+                    head.authorization = Some(value());
                 }
             }
             Ok(Some((head, len)))
@@ -125,12 +129,25 @@ pub fn upgrade_response(
 
 /// A complete response that asks the client to close.
 pub fn response(status: &str, content_type: Option<&str>, body: &[u8]) -> Vec<u8> {
+    response_with(status, content_type, &[], body)
+}
+
+/// [`response`] with extra header lines (`name`, `value`).
+pub fn response_with(
+    status: &str,
+    content_type: Option<&str>,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Vec<u8> {
     let mut head = format!(
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     if let Some(ct) = content_type {
         head.push_str(&format!("Content-Type: {ct}\r\n"));
+    }
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
     let mut bytes = head.into_bytes();

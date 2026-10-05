@@ -38,7 +38,7 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 |---|---|
 | `crates/wt-core` | `Shard`, `Key`, `Request`, `Outbox`, `Settings` |
 | `crates/wt-proto` | wire protocol: `handle`, parser backends, `Encoder` (§7) |
-| `crates/wt-server` | the server, binary `wt-tracker` (§13); `src/ws/` own WebSocket framing (`codec`), permessage-deflate (`deflate`) and connection driver (`driver`); `placement` info_hash directory, worker loads and placement choices (§13.3); `stats` / `metrics` / `reasons` / `logging` (§13.5, §13.7, §13.8); `echo` + `examples/ws-echo.rs` echo server for conformance testing |
+| `crates/wt-server` | the server, binary `wt-tracker` (§13); `src/ws/` own WebSocket framing (`codec`), permessage-deflate (`deflate`) and connection driver (`driver`); `placement` info_hash directory, worker loads and placement choices (§13.3); `stats` / `metrics` / `reasons` / `logging` (§13.5, §13.7, §13.8); `auth` basic auth and `process` `/proc` readers for the metrics listener (§13.7); `echo` + `examples/ws-echo.rs` echo server for conformance testing |
 | `crates/wt-loadgen`, `loadtest/run.sh` | load generator (tokio-tungstenite, or its own client `src/client.rs` for permessage-deflate and wire bytes), wire smoke check, JS vs Rust load test (§14) |
 | `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss, incl. compression (§9) |
 | `loadtest/aquatic.sh`, `loadtest/aquatic/` | load test against aquatic_ws in a Linux container (§14) |
@@ -54,6 +54,7 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 | `bench/run.sh`, `bench/compare.ts` | run both sides and regenerate §11 |
 | `docs/SPEC.md` | this specification |
 | `docs/install-oracle-ampere-a1.md` | install guide for Oracle Cloud Ampere A1 with certbot (ports, stateless security rules, systemd, renewal by reload) |
+| `monitoring/` | monitoring kit on `/metrics` alone: Grafana dashboard (`grafana-dashboard.json`), Prometheus alert rules (`alerts.yaml`), setup guide for Grafana Cloud's free tier or Prometheus (§13.7) |
 | `AGENTS.md` | agent-neutral working rules (spec upkeep, checklist); `CLAUDE.md` imports it |
 | `.agents/skills/` | shared agent skills; `.claude/skills` symlinks here |
 | `scripts/check-spec.sh` | fails when code changed without a `docs/SPEC.md` change |
@@ -345,7 +346,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   - `http_upgrade`: `parse_head`, `upgrade_response` with and without compression,
     `path_matches`, `negotiate`: a well-formed `101` (every header line `Name: value`, no CR /
     LF in values, so echoed request values cannot inject headers), the extension header only
-    when negotiated, outgoing windows 9..15 or none;
+    when negotiated, outgoing windows 9..15 or none; the parsed `Authorization` through
+    `auth::Credentials::check` (passes only if it decodes to the configured credentials);
   - `protocol`: frames (`0xFF`-separated, connection and kind from the first byte) parsed and
     applied to a shard with disconnects and expiry, both directly and through
     `OwnedMessage::copy_from` on a second shard with the same seed: `check_invariants` after
@@ -493,10 +495,21 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   with `invalid_json`, `too_big`, `eof`, `bad_request`, `idle_timeout`); answers to an unknown
   peer spread over 4 shards (`hash`, some dropped by a remote shard) are counted in
   `wt_dropped_answers_total` and the connections stay open, while an answer without `info_hash`
-  closes with 1008 (`bad_field`); no metrics listener unless configured. `tests/suite`: the exact
+  closes with 1008 (`bad_field`); no metrics listener unless configured; basic auth on the
+  metrics listener (no header, a wrong password or user, another scheme → 401 with
+  `WWW-Authenticate` on `/metrics`, `/swarms` and `/stats.json`; the right one → 200; its
+  `/stats.json` has the public keys); an HTTPS metrics listener (plain HTTP gets no HTTP
+  response, 401 without auth, its certificate reloaded by `Server::reload_tls` and shown in
+  `wt_tls_certificate_expiry_seconds`) whose `/metrics` exports every `wt_*` / `process_*` name
+  used by `monitoring/grafana-dashboard.json` and `monitoring/alerts.yaml` (the Linux-only
+  series checked on Linux). `tests/suite`: the exact
   `/stats.json` keys, `?infoHash=` (unknown swarm, malformed → 400), `/metrics` only on its own
   listener, `wt_http_requests_total`. Unit tests: logfmt quoting, RFC 3339 timestamps, the rate
-  limit, label uniqueness, metric text escaping, info_hash hex and query parsing. The test
+  limit, label uniqueness, metric text escaping, info_hash hex and query parsing; `auth.rs`
+  (right credentials in any scheme case pass; a wrong user or password, no `:`, empty, another
+  scheme, bad base64 or no header fail); `config.rs` (the metrics pairs, empty and `:` values,
+  the clear-text warning); `process.rs` (`stat`, `limits` and `netstat` parsing; on Linux, this
+  process's files). The test
   helper `start()` adds a metrics listener on 127.0.0.1 (any port) unless the config has
   `metrics`. `wt-proto/tests/owned.rs`:
   `OwnedMessage` round trip (also across threads) and `Encoder::take`.
@@ -762,6 +775,12 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
 - **Hardening (done, §5.3, §5.4):** a stop from another connection is a no-op; answers are
   delivered only between members of their swarm from a peer of the sending connection (else
   dropped and counted); an answer needs a string `info_hash`.
+- **Monitoring without an agent (done, §13.7):** the metrics listener can use HTTPS (reloaded
+  with the other certificates) and basic auth, and serves `/stats.json` too, so a hosted
+  scraper (Grafana Cloud's Metrics Endpoint needs an HTTPS URL) can read it from the internet;
+  `/metrics` adds process CPU, file descriptors, CPU per worker thread and kernel listen-queue
+  overflows (Linux). `monitoring/` has a Grafana dashboard, alert rules and a setup guide built
+  on `/metrics` alone. Open: publish the dashboard on grafana.com.
 
 ## 13. Server (`crates/wt-server`, binary `wt-tracker`)
 
@@ -793,7 +812,7 @@ defaults (like the JS tracker). `wt_server::start(Config) -> Server` runs it in-
 | `shutdownTimeout` (new) | 5 | seconds a graceful shutdown waits for connections to close (§13.6) |
 | `tlsReloadInterval` (removed) | — | an earlier file watcher; ignored with a startup warning (certificates reload on SIGHUP only) |
 | `logLevel` (new) | `info` | `error` / `warn` / `info` / `debug` (§13.8); unknown value → config error |
-| `metrics` (new) | — (off) | `{"host", "port"}` (defaults `127.0.0.1`, 9100): private plain HTTP listener for `GET /metrics` and `GET /swarms` (§13.7), accepted by worker 0; port 0 = any (`Server::metrics_addr`) |
+| `metrics` (new) | — (off) | `{"host", "port", "cert_file_name", "key_file_name", "username", "password"}` (defaults `127.0.0.1`, 9100, none): listener for `GET /metrics`, `GET /swarms` and `GET /stats.json` (§13.7), accepted by worker 0; port 0 = any (`Server::metrics_addr`). `cert_file_name` + `key_file_name`: HTTPS (else plain HTTP); `username` + `password`: HTTP basic auth on every route (else none). Each pair must be set together, the username and password must not be empty and the username must not contain `:` → config error; basic auth without TLS → `config_warning` (§13.8) |
 
 Unknown fields are ignored. Invalid config (wrong types, both origin lists, half a key pair,
 `workers` out of range, unknown `offerSelection`, `placement` or `logLevel`) → error at startup.
@@ -808,7 +827,7 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
   after the head are kept.
 - Otherwise: `GET /` → `index.html` (200) or `404 Not Found`; `GET /stats.json` (§13.5); anything
   else → `404 Not Found`. HTTP responses close the connection. `/metrics` and `/swarms` are served
-  only on the metrics listener (§13.7).
+  only on the metrics listener (§13.7), which serves `/stats.json` too.
 - WebSocket (`src/ws`): own RFC 6455 server framing, one task per connection, driven by socket
   readiness (`ready` + `try_read` / `try_write_vectored`):
   - **Shared buffers per worker thread:** every connection reads into one buffer of its worker
@@ -839,7 +858,8 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
     never stall connections and newer files are always installed last (the comparison with the served certificate and
     the swap happen under one write lock; the order of reloads comes from the single thread). If the thread is gone
     (a panic), a reload request logs `tls_reload_failed listener=*`. Open connections keep their
-    session. `notAfter` of the leaf is read from its DER (`validity`, UTCTime or
+    session. An HTTPS metrics listener (§13.7) has its own `CertStore` and is reloaded with the
+    wss:// listeners (the same request, thread and log lines, `listener` = its `host:port`). `notAfter` of the leaf is read from its DER (`validity`, UTCTime or
     GeneralizedTime) for the log and `/metrics`.
   - **Writes:** queued messages are sent with one vectored write per wake-up (frame headers +
     the shared encoder slices, no copy); TLS encrypts up to 64 KiB of frames per batch.
@@ -984,8 +1004,20 @@ Malformed hex → `400 Bad Request`. The list of swarms is on the private listen
 
 ### 13.7 `/metrics` and `/swarms`
 
-The `metrics` listener (plain HTTP, off without the setting) serves `GET /metrics` and
-`GET /swarms`; anything else → 404.
+The `metrics` listener (off without the setting, §13.1) serves `GET /metrics`, `GET /swarms` and
+`GET /stats.json` (the public response, §13.5, from `stats::response`); anything else → 404.
+Every response closes the connection; it is not counted in `wt_http_requests_total`.
+
+- **HTTPS** with `cert_file_name` + `key_file_name`: the rustls config of the wss:// listeners
+  (same versions, ALPN `http/1.1`, session tickets), its own `CertStore` reloaded with theirs
+  (§13.2). TLS handshake and request head within 10 s; a failed handshake → debug
+  `tls_handshake_failed` (`listener`, `peer`, `error`) and close, without an HTTP response.
+- **Basic auth** with `username` + `password`, on every route: an `Authorization` header with
+  scheme `Basic` (any case) whose base64 decodes to `username:password` passes; anything else (no
+  header, another scheme, bad base64, other credentials) → `401 Unauthorized` with
+  `WWW-Authenticate: Basic realm="wt-tracker", charset="UTF-8"`, a debug `unauthorized` event
+  (`peer`, `path`) and close. The expected and given credentials are compared as SHA-1 digests
+  in constant time (`auth::Credentials`), so timing shows neither content nor length.
 
 `GET /swarms?top=N` (default 100; 0 = all; not a number → 400): the largest swarms of all
 workers, `{"swarms":[{"infoHash":"<hex as in §13.5>", "peers", "worker"}], "total":<swarms of
@@ -1001,6 +1033,10 @@ the hot path) and gathered as in §13.4. Families:
 |---|---|---|---|
 | `wt_build_info` | gauge | `version` | 1 |
 | `process_start_time_seconds`, `process_resident_memory_bytes` | gauge | – | start time (Unix seconds), RSS (if available) |
+| `process_cpu_seconds_total` | counter | – | user + system CPU of the process (`/proc/self/stat`; Linux) |
+| `process_open_fds`, `process_max_fds` | gauge | – | entries of `/proc/self/fd`; soft `Max open files` of `/proc/self/limits` (none if unlimited) (Linux) |
+| `wt_worker_cpu_seconds_total` | counter | worker | user + system CPU of the worker thread (`/proc/self/task/<tid>/stat`; Linux): each worker stores its thread id (`/proc/thread-self`) in `Shared.worker_tids` at start and worker 0 reads every file, so a stuck worker's CPU shows although its `wt_worker_up` is 0 |
+| `wt_tcp_listen_overflows_total` | counter | – | `TcpExt ListenOverflows` of `/proc/net/netstat` (Linux; the network namespace, all listeners and processes): connections dropped because an accept queue was full |
 | `wt_worker_up` | gauge | worker | 1 if the worker answered within 1 s |
 | `wt_torrents`, `wt_peers` | gauge | worker | swarms, peers summed over swarms |
 | `wt_connections` | gauge | worker | open WebSocket connections (placement loads) |
@@ -1020,8 +1056,17 @@ the hot path) and gathered as in §13.4. Families:
 | `wt_expired_peers_total` | counter | worker | peers removed by expiry |
 | `wt_dropped_messages_total` | counter | – | messages dropped by `maxBackpressure` |
 | `wt_directory_entries` | gauge | – | info_hashes bound in the directory (`content`) |
-| `wt_tls_reloads_total` | counter | `listener`, `result` | certificate reloads of a wss:// listener on request (SIGHUP or `Server::reload_tls`): `ok` (a new certificate served), `error` (kept the old one); unchanged reloads are not counted |
-| `wt_tls_certificate_expiry_seconds` | gauge | `listener` | `notAfter` of the certificate a wss:// listener serves (Unix seconds; no sample if it could not be parsed) |
+| `wt_tls_reloads_total` | counter | `listener`, `result` | certificate reloads of a TLS listener (wss:// or the HTTPS metrics listener) on request (SIGHUP or `Server::reload_tls`): `ok` (a new certificate served), `error` (kept the old one); unchanged reloads are not counted |
+| `wt_tls_certificate_expiry_seconds` | gauge | `listener` | `notAfter` of the certificate a TLS listener serves (Unix seconds; no sample if it could not be parsed) |
+
+Series marked Linux are read from `/proc` per scrape (CPU times in `USER_HZ` = 100 ticks per
+second); elsewhere, or if a file cannot be read, the family is left out. `monitoring/` (§2) is
+built on these series only, so a scrape of `/metrics` (job `wt-tracker`) is all it needs: the
+Grafana dashboard (data source and `job` variables) and the alert rules `TrackerDown`
+(`absent_over_time(wt_build_info[3m])`), `WorkerNotAnswering`, `WorkerCpuBusy` (> 0.9 of a core
+for 1 min), `TrackerRestarted`, `MemoryHigh` (> 1.5 GB), `FileDescriptorsNearLimit` (> 80%),
+`ListenOverflows` (> 10 per minute), `EgressPace` (24 h average of
+`wt_socket_bytes_total{direction="out"}` > 3.5 MB/s) and `CertificateExpiring` (< 14 days).
 
 ### 13.8 Logging
 
@@ -1036,9 +1081,9 @@ become `event=library target=… message=…`.
 | Level | Events |
 |---|---|
 | error | `config_read_failed`, `config_invalid`, `start_failed` (exit 1); `accept_failed` (*limited*, e.g. EMFILE; `listener`, `error`); `tls_reload_failed` (`listener`, `error`; `listener=*` if the reload thread stopped) |
-| warn | `config_warning` (ignored JS options); `worker_not_responding` (*limited*); `stopped_without_waiting` (second signal) |
+| warn | `config_warning` (ignored JS options; removed `tlsReloadInterval`; metrics basic auth without TLS); `worker_not_responding` (*limited*); `stopped_without_waiting` (second signal) |
 | info | `listening` (`addr`, per listener), `metrics_listening`, `started` (`version`, `workers`, `placement`); `shutting_down`, `stopped`; `reload_requested` (SIGHUP), `tls_reloaded` (`listener`, `not_after` or `unknown`), `tls_unchanged` (`listener`: the files hold the certificate already served); `rejected_message` (*limited*; `reason`, `error`, `worker`) |
-| debug | `connection_closed` (`reason` as in §13.7, `peer`, `duration_s`, `worker`) for every connection, upgraded or not; `upgrade_denied` (`reason`, `peer`); `tls_handshake_failed` (`peer`, `error`); `not_found` (`peer`, `path`) |
+| debug | `connection_closed` (`reason` as in §13.7, `peer`, `duration_s`, `worker`) for every connection, upgraded or not; `upgrade_denied` (`reason`, `peer`); `tls_handshake_failed` (`peer`, `error`; on the metrics listener also `listener`); `unauthorized` (metrics listener: `peer`, `path`); `not_found` (`peer`, `path`) |
 
 Until the configured level is set (`logging::init`, called by the binary after reading the
 configuration) the level is `warn`: configuration errors are written, and in-process use

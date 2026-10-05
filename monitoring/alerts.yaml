@@ -1,0 +1,48 @@
+# wt-tracker-rust alert rules (Prometheus rule format) on the tracker's /metrics, scraped as
+# job "wt-tracker". Grafana Cloud: create each rule under Alerting → Alert rules (same query,
+# threshold and pending period), or load the file into your stack's ruler with
+# `mimirtool rules load alerts.yaml`. Self-hosted Prometheus: list it under `rule_files`.
+groups:
+  - name: wt-tracker
+    rules:
+      - alert: TrackerDown
+        expr: absent_over_time(wt_build_info{job="wt-tracker"}[3m])
+        annotations:
+          summary: No /metrics for 3 minutes; the tracker is down, unreachable, or its first worker is stuck.
+      - alert: WorkerNotAnswering
+        expr: min(wt_worker_up{job="wt-tracker"}) < 1
+        for: 2m
+        annotations:
+          summary: A worker has not answered the scrape within 1 s for 2 minutes (stuck or overloaded).
+      - alert: WorkerCpuBusy
+        expr: max(rate(wt_worker_cpu_seconds_total{job="wt-tracker"}[1m])) > 0.9
+        for: 1m
+        annotations:
+          summary: A worker thread uses more than 90% of a core.
+      - alert: TrackerRestarted
+        expr: changes(process_start_time_seconds{job="wt-tracker"}[10m]) > 0
+        annotations:
+          summary: The tracker restarted (deploy, crash or out-of-memory kill).
+      - alert: MemoryHigh
+        expr: process_resident_memory_bytes{job="wt-tracker"} > 1.5e9
+        for: 5m
+        annotations:
+          summary: Tracker memory above 1.5 GB (about 15 KB per peer is normal); adjust to your server.
+      - alert: FileDescriptorsNearLimit
+        expr: process_open_fds{job="wt-tracker"} / process_max_fds{job="wt-tracker"} > 0.8
+        for: 5m
+        annotations:
+          summary: Over 80% of the file descriptor limit is in use; new connections will fail at the limit.
+      - alert: ListenOverflows
+        expr: rate(wt_tcp_listen_overflows_total{job="wt-tracker"}[5m]) * 60 > 10
+        for: 5m
+        annotations:
+          summary: The kernel drops new connections because an accept queue is full.
+      - alert: EgressPace
+        expr: avg_over_time(sum(rate(wt_socket_bytes_total{job="wt-tracker",direction="out"}[5m]))[24h:5m]) > 3.5e6
+        annotations:
+          summary: 24-hour average egress above 3.5 MB/s; 10 TB per month is 3.86 MB/s.
+      - alert: CertificateExpiring
+        expr: min(wt_tls_certificate_expiry_seconds{job="wt-tracker"}) - time() < 14 * 86400
+        annotations:
+          summary: A served certificate expires in under 14 days; check its renewal and the reload (SIGHUP).

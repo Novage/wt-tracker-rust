@@ -11,7 +11,8 @@ What you get:
 
 - `wss://tracker.example.com` on port 443 (TLS, certificate reloaded on renewal: connections stay).
 - Optional: `ws://` and `http://` on port 80 (redirected to the tracker's plain listener).
-- Optional: Prometheus `/metrics` and `/swarms` on `127.0.0.1:9100`.
+- Optional: Prometheus `/metrics` and `/swarms` on `127.0.0.1:9100`, or over HTTPS with a
+  password for Grafana Cloud's free tier (section 11).
 
 ## 1. Create the instance
 
@@ -315,7 +316,40 @@ around each renewal.
 
 An `index.html` for `/` can be set with `"indexHtml": "/etc/wt-tracker-rust/index.html"`.
 
-## 11. Update and roll back
+## 11. Optional: monitoring with Grafana Cloud (free)
+
+Grafana Cloud scrapes `/metrics` from the internet and needs HTTPS, so the metrics listener uses
+the tracker's certificate copy and a password:
+
+1. In `config.json`, replace the `metrics` entry (pick your own password):
+
+   ```json
+   "metrics": {
+     "host": "0.0.0.0", "port": 9000,
+     "cert_file_name": "/etc/wt-tracker-rust/tls/fullchain.pem",
+     "key_file_name": "/etc/wt-tracker-rust/tls/privkey.pem",
+     "username": "grafana", "password": "a-long-random-password"
+   }
+   ```
+
+2. The file now holds a password: readable by root and the service group only. Open port 9000
+   in the security list (section 2, stateless like 443) and in iptables, then restart:
+
+   ```bash
+   sudo chgrp wt-tracker-tls /etc/wt-tracker-rust/config.json
+   sudo chmod 640 /etc/wt-tracker-rust/config.json
+   sudo iptables -I INPUT 6 -p tcp -m state --state NEW -m tcp --dport 9000 -j ACCEPT   # before REJECT
+   sudo netfilter-persistent save
+   sudo systemctl restart wt-tracker-rust.service
+   curl -s -u grafana:a-long-random-password https://tracker.example.com:9000/metrics | head -3
+   ```
+
+   The renewal hook (section 8) reloads this certificate too.
+
+3. In Grafana Cloud, add the scrape job, import the dashboard and create the alerts:
+   [`monitoring/README.md`](../monitoring/README.md).
+
+## 12. Update and roll back
 
 ```bash
 cd ~/wt-tracker-rust && git pull && ~/.cargo/bin/cargo build --release -p wt-server
@@ -328,7 +362,7 @@ A restart closes every connection with 1001 (Going Away) and takes a few seconds
 reconnect. Configuration changes also need a restart (certificates only a reload). To roll
 back, copy `wt-tracker.prev` back and restart.
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 - **New connections and SSH time out, existing peers keep working:** Oracle's connection
   tracking is full; make the 80 / 443 rules stateless (section 2). Reboot from the console if

@@ -1,0 +1,4 @@
+GET /metrics HTTP/1.1
+Host: x
+Authorization: Bearer ZnV6ejpwYTpzcw==
+

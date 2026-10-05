@@ -2,6 +2,7 @@
 //! shard and connections; own WebSocket framing over TCP or TLS (rustls), reading into one
 //! shared buffer per worker. Spec §13.
 
+mod auth;
 pub mod config;
 mod conn;
 pub mod echo;
@@ -12,6 +13,7 @@ mod http;
 pub mod logging;
 mod metrics;
 pub mod placement;
+mod process;
 mod reasons;
 mod stats;
 mod tls;
@@ -21,7 +23,7 @@ mod ws;
 use std::hash::BuildHasher;
 use std::net::{SocketAddr, TcpListener as StdListener, ToSocketAddrs};
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicI32, AtomicUsize};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -53,15 +55,33 @@ pub(crate) struct Shared {
     /// When the server started (uptime), and as seconds since the Unix epoch (`/metrics`).
     pub started: Instant,
     pub started_unix: u64,
+    /// The metrics listener's TLS and basic auth (spec §13.7), if configured.
+    pub metrics: Option<MetricsListener>,
+    /// Kernel thread id of each worker (0 until it starts; Linux), for `/metrics` CPU per worker.
+    pub worker_tids: Vec<AtomicI32>,
 }
 
 impl Shared {
-    /// `(listener, certificate)` of every wss:// listener.
+    /// `(listener, certificate)` of every TLS listener: wss:// and an HTTPS metrics listener.
     pub(crate) fn certs(&self) -> impl Iterator<Item = (&str, &Arc<tls::CertStore>)> {
+        let metrics = self
+            .metrics
+            .as_ref()
+            .and_then(|m| Some((m.name.as_str(), &m.tls.as_ref()?.cert)));
         self.listeners
             .iter()
             .filter_map(|l| Some((l.name.as_str(), &l.tls.as_ref()?.cert)))
+            .chain(metrics)
     }
+}
+
+pub(crate) struct MetricsListener {
+    /// `host:port` as configured.
+    pub name: String,
+    /// HTTPS when set.
+    pub tls: Option<tls::Tls>,
+    /// Basic auth for every route when set.
+    pub auth: Option<auth::Credentials>,
 }
 
 pub(crate) struct ListenerInfo {
@@ -89,7 +109,7 @@ pub(crate) enum Phase {
 pub struct Server {
     addrs: Vec<SocketAddr>,
     metrics_addr: Option<SocketAddr>,
-    /// Reloads the certificates (only with a wss:// listener).
+    /// Reloads the certificates (only with a TLS listener).
     tls: Option<tls::Reloader>,
     workers: usize,
     shutdown: watch::Sender<Phase>,
@@ -111,8 +131,9 @@ impl Server {
         self.workers
     }
 
-    /// Reloads the certificate of every wss:// listener from its files (SIGHUP) and logs the
-    /// result; a listener whose files fail to load keeps its certificate.
+    /// Reloads the certificate of every TLS listener (wss:// and an HTTPS metrics listener) from
+    /// its files (SIGHUP) and logs the result; a listener whose files fail to load keeps its
+    /// certificate.
     pub fn reload_tls(&self) -> Vec<(String, Reload)> {
         self.tls
             .as_ref()
@@ -206,7 +227,7 @@ pub fn start(config: Config) -> Result<Server, String> {
     }
 
     // Worker 0 accepts the metrics scrapers.
-    let mut metrics = match &config.metrics {
+    let (mut metrics, metrics_listener) = match &config.metrics {
         Some(m) => {
             let name = format!("{}:{}", m.host, m.port);
             let addr = (m.host.as_str(), m.port)
@@ -214,9 +235,19 @@ pub fn start(config: Config) -> Result<Server, String> {
                 .map_err(|e| format!("metrics {name}: {e}"))?
                 .next()
                 .ok_or_else(|| format!("metrics {name}: no address"))?;
-            Some(bind(addr, false).map_err(|e| format!("failed to listen to {name}: {e}"))?)
+            let socket =
+                bind(addr, false).map_err(|e| format!("failed to listen to {name}: {e}"))?;
+            let tls = match (&m.cert_file_name, &m.key_file_name) {
+                (Some(cert), Some(key)) => Some(tls::Tls::open(cert, key)?),
+                _ => None,
+            };
+            let auth = match (&m.username, &m.password) {
+                (Some(user), Some(password)) => Some(auth::Credentials::new(user, password)),
+                _ => None,
+            };
+            (Some(socket), Some(MetricsListener { name, tls, auth }))
         }
-        None => None,
+        None => (None, None),
     };
     let metrics_addr = match &metrics {
         Some(socket) => Some(socket.local_addr().map_err(|e| e.to_string())?),
@@ -254,6 +285,8 @@ pub fn start(config: Config) -> Result<Server, String> {
         started_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
+        metrics: metrics_listener,
+        worker_tids: (0..workers).map(|_| AtomicI32::new(0)).collect(),
     });
     let certs: Vec<_> = shared
         .certs()

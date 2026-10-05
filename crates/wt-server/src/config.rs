@@ -41,7 +41,8 @@ pub struct Config {
     /// Removed (an earlier file watcher for the certificates): accepted with a startup warning.
     #[serde(default)]
     pub tls_reload_interval: Option<serde_json::Value>,
-    /// Prometheus `/metrics` on a separate plain HTTP listener; off when absent (spec §13.7).
+    /// Prometheus `/metrics`, `/swarms` and `/stats.json` on a separate listener; off when
+    /// absent (spec §13.7).
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
 }
@@ -52,6 +53,13 @@ pub struct MetricsConfig {
     pub host: String,
     #[serde(default = "default_metrics_port")]
     pub port: u16,
+    /// PEM private key; together with `cert_file_name` enables HTTPS.
+    pub key_file_name: Option<PathBuf>,
+    /// PEM certificate chain.
+    pub cert_file_name: Option<PathBuf>,
+    /// HTTP basic auth for every route; together with `password`.
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -217,6 +225,25 @@ impl Config {
                 return Err("key_file_name and cert_file_name must be set together".into());
             }
         }
+        if let Some(m) = &self.metrics {
+            if m.key_file_name.is_some() != m.cert_file_name.is_some() {
+                return Err(
+                    "metrics: key_file_name and cert_file_name must be set together".into(),
+                );
+            }
+            match (&m.username, &m.password) {
+                (None, None) => {}
+                (Some(user), Some(password)) => {
+                    if user.is_empty() || password.is_empty() {
+                        return Err("metrics: username and password must not be empty".into());
+                    }
+                    if user.contains(':') {
+                        return Err("metrics: username must not contain ':'".into());
+                    }
+                }
+                _ => return Err("metrics: username and password must be set together".into()),
+            }
+        }
         if !(1..=64).contains(&self.worker_count()) {
             return Err("'workers' must be between 1 and 64".into());
         }
@@ -298,6 +325,16 @@ impl Config {
                     .into(),
             );
         }
+        if let Some(m) = &self.metrics
+            && m.username.is_some()
+            && m.cert_file_name.is_none()
+        {
+            warnings.push(
+                "metrics: basic auth without TLS sends the password in clear text \
+                 (set cert_file_name and key_file_name)"
+                    .into(),
+            );
+        }
         warnings
     }
 }
@@ -316,5 +353,30 @@ mod tests {
             warnings.len() == 1 && warnings[0].contains("SIGHUP"),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn metrics_tls_and_basic_auth_are_set_in_pairs() {
+        let metrics = |fields: &str| Config::from_json(&format!(r#"{{"metrics":{{{fields}}}}}"#));
+        assert!(metrics("").is_ok());
+        assert!(metrics(r#""cert_file_name":"c.pem""#).is_err());
+        assert!(metrics(r#""key_file_name":"k.pem""#).is_err());
+        assert!(metrics(r#""username":"u""#).is_err());
+        assert!(metrics(r#""password":"p""#).is_err());
+        assert!(metrics(r#""username":"u","password":"""#).is_err());
+        assert!(metrics(r#""username":"","password":"p""#).is_err());
+        assert!(metrics(r#""username":"a:b","password":"p""#).is_err());
+
+        let plain = metrics(r#""username":"u","password":"p""#).unwrap();
+        let warnings = plain.warnings();
+        assert!(
+            warnings.len() == 1 && warnings[0].contains("clear text"),
+            "{warnings:?}"
+        );
+        let tls = metrics(
+            r#""username":"u","password":"p","cert_file_name":"c.pem","key_file_name":"k.pem""#,
+        )
+        .unwrap();
+        assert!(tls.warnings().is_empty());
     }
 }

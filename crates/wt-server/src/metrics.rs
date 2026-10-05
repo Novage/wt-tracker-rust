@@ -1,13 +1,14 @@
-//! The private listener (spec §13.7): Prometheus `/metrics` (text format 0.0.4) and `/swarms`.
+//! The metrics listener (spec §13.7): Prometheus `/metrics` (text format 0.0.4), `/swarms` and
+//! `/stats.json`; HTTPS and basic auth when configured.
 
 use std::fmt::{Display, Write as _};
+use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::spawn_local;
-use tokio::time::timeout;
 
 use crate::http;
 use crate::reasons::{CloseReason, HttpRoute, RejectReason};
@@ -15,7 +16,7 @@ use crate::stats;
 use crate::worker::{DROPPED_MESSAGES, ShardStats, Worker};
 use crate::ws::driver::Io;
 
-/// The request head must arrive within this time.
+/// The TLS handshake and the request head must complete within this time.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// `/swarms` without `top`.
 const DEFAULT_TOP: usize = 100;
@@ -24,8 +25,8 @@ const DEFAULT_TOP: usize = 100;
 pub(crate) async fn accept_loop(me: Rc<Worker>, socket: TcpListener) {
     loop {
         match socket.accept().await {
-            Ok((stream, _)) => {
-                spawn_local(serve(me.clone(), stream));
+            Ok((stream, peer)) => {
+                spawn_local(serve(me.clone(), stream, peer));
             }
             Err(e) => {
                 crate::event_limited!(Error, "accept_failed", listener = "metrics", error = e);
@@ -35,12 +36,56 @@ pub(crate) async fn accept_loop(me: Rc<Worker>, socket: TcpListener) {
     }
 }
 
-async fn serve(me: Rc<Worker>, stream: TcpStream) {
-    let mut io = Io::Plain(stream);
-    let Ok(Ok((head, _))) = timeout(HEAD_TIMEOUT, io.read_head()).await else {
+async fn serve(me: Rc<Worker>, stream: TcpStream, peer: SocketAddr) {
+    let Some(listener) = me.shared.metrics.as_ref() else {
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + HEAD_TIMEOUT;
+    let mut io = match &listener.tls {
+        Some(tls) => {
+            match tokio::time::timeout_at(deadline, Io::accept_tls(stream, tls.config.clone()))
+                .await
+            {
+                Ok(Ok(io)) => io,
+                failed => {
+                    let error = match failed {
+                        Ok(Err(e)) => e.to_string(),
+                        _ => "timeout".into(),
+                    };
+                    crate::event!(
+                        Debug,
+                        "tls_handshake_failed",
+                        listener = listener.name,
+                        peer = peer,
+                        error = error
+                    );
+                    return;
+                }
+            }
+        }
+        None => Io::Plain(stream),
+    };
+    let Ok(Ok((head, _))) = tokio::time::timeout_at(deadline, io.read_head()).await else {
         return;
     };
     let (path, query) = head.path.split_once('?').unwrap_or((&head.path, ""));
+    if let Some(auth) = &listener.auth
+        && !auth.check(head.authorization.as_deref())
+    {
+        crate::event!(Debug, "unauthorized", peer = peer, path = path);
+        let response = http::response_with(
+            "401 Unauthorized",
+            None,
+            &[(
+                "WWW-Authenticate",
+                "Basic realm=\"wt-tracker\", charset=\"UTF-8\"",
+            )],
+            b"401 Unauthorized",
+        );
+        let _ = io.write_all(&response).await;
+        io.shutdown().await;
+        return;
+    }
     let response = match (head.method.as_str(), path) {
         ("GET", "/metrics") => {
             let body = render(&me).await;
@@ -55,6 +100,7 @@ async fn serve(me: Rc<Worker>, stream: TcpStream) {
             Some(Ok(top)) => swarms_response(&me, top).await,
             Some(Err(_)) => http::response("400 Bad Request", None, b"top must be a number"),
         },
+        ("GET", "/stats.json") => stats::response(&me, query).await,
         _ => http::response("404 Not Found", None, b"404 Not Found"),
     };
     let _ = io.write_all(&response).await;
@@ -167,6 +213,61 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
             "Resident memory size, in bytes.",
         );
         t.sample("process_resident_memory_bytes", &[], rss);
+    }
+    if let Some(cpu) = crate::process::cpu_seconds() {
+        t.family(
+            "process_cpu_seconds_total",
+            "counter",
+            "User and system CPU time of the process, in seconds.",
+        );
+        t.sample("process_cpu_seconds_total", &[], cpu);
+    }
+    if let Some(fds) = crate::process::open_fds() {
+        t.family(
+            "process_open_fds",
+            "gauge",
+            "Open file descriptors (connections included).",
+        );
+        t.sample("process_open_fds", &[], fds);
+    }
+    if let Some(max) = crate::process::max_fds() {
+        t.family(
+            "process_max_fds",
+            "gauge",
+            "Limit on open file descriptors (soft).",
+        );
+        t.sample("process_max_fds", &[], max);
+    }
+    // Read from /proc by this worker: a stuck worker's CPU shows although it does not answer.
+    let worker_cpu: Vec<(usize, f64)> = shared
+        .worker_tids
+        .iter()
+        .enumerate()
+        .filter_map(|(worker, tid)| {
+            let tid = tid.load(Relaxed);
+            (tid != 0)
+                .then(|| crate::process::thread_cpu_seconds(tid))
+                .flatten()
+                .map(|cpu| (worker, cpu))
+        })
+        .collect();
+    if !worker_cpu.is_empty() {
+        t.family(
+            "wt_worker_cpu_seconds_total",
+            "counter",
+            "User and system CPU time of the worker thread, in seconds.",
+        );
+        for (worker, cpu) in worker_cpu {
+            t.sample("wt_worker_cpu_seconds_total", &[("worker", &worker)], cpu);
+        }
+    }
+    if let Some(overflows) = crate::process::listen_overflows() {
+        t.family(
+            "wt_tcp_listen_overflows_total",
+            "counter",
+            "Connections dropped by the kernel because an accept queue was full (host-wide).",
+        );
+        t.sample("wt_tcp_listen_overflows_total", &[], overflows);
     }
 
     t.family(
@@ -388,7 +489,7 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
         t.family(
             "wt_tls_reloads_total",
             "counter",
-            "Certificate reloads of wss:// listeners on request (SIGHUP or Server::reload_tls), by result.",
+            "Certificate reloads of TLS listeners on request (SIGHUP or Server::reload_tls), by result.",
         );
         for (name, cert) in shared.certs() {
             for (result, n) in [("ok", &cert.reloads_ok), ("error", &cert.reloads_failed)] {
@@ -402,7 +503,7 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
         t.family(
             "wt_tls_certificate_expiry_seconds",
             "gauge",
-            "notAfter of the certificate a wss:// listener serves, in Unix seconds.",
+            "notAfter of the certificate a TLS listener serves, in Unix seconds.",
         );
         // No sample for a certificate whose notAfter could not be parsed: a 0 would look expired.
         for (name, cert) in shared.certs() {

@@ -225,23 +225,7 @@ async fn route(me: &Rc<Worker>, listener: usize, head: &http::Head) -> Route {
             None => not_found(),
         },
         ("GET", "/stats.json") => {
-            let response = match stats::query_param(query, "infoHash") {
-                None => {
-                    let body = stats::json(me).await;
-                    http::response("200 OK", Some("application/json"), body.as_bytes())
-                }
-                Some(hex) => match stats::swarm_json(me, hex).await {
-                    Some(body) => {
-                        http::response("200 OK", Some("application/json"), body.as_bytes())
-                    }
-                    None => http::response(
-                        "400 Bad Request",
-                        None,
-                        b"infoHash must be 2 to 80 hex digits",
-                    ),
-                },
-            };
-            Route::Respond(response, HttpRoute::Stats)
+            Route::Respond(stats::response(me, query).await, HttpRoute::Stats)
         }
         _ => not_found(),
     }

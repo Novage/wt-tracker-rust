@@ -956,6 +956,9 @@ pub(crate) fn run(
     metrics: Option<StdListener>,
     mut phase: watch::Receiver<Phase>,
 ) {
+    if let Some(tid) = crate::process::current_tid() {
+        shared.worker_tids[id].store(tid, Relaxed);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -61,6 +61,14 @@ All notable changes to this project are listed here. The format follows
   that does not match is rejected and the old certificate kept. Metrics `wt_tls_reloads_total`
   and `wt_tls_certificate_expiry_seconds`.
 
+- Metrics listener: optional HTTPS (`cert_file_name` / `key_file_name`, reloaded on SIGHUP with
+  the other certificates) and HTTP basic auth (`username` / `password`), so a hosted scraper
+  such as Grafana Cloud can read it from the internet; it also serves `/stats.json`.
+- `/metrics`: process CPU, open and maximum file descriptors, CPU per worker thread (a stuck
+  worker shows at 100%) and the kernel's listen-queue overflows (Linux).
+- `monitoring/`: a Grafana dashboard and alert rules built on `/metrics` alone, with a setup
+  guide for Grafana Cloud's free tier or Prometheus.
+
 ### Changed
 
 - **Hardening (differs from the JS tracker):** a `stop` is applied only from the connection

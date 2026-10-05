@@ -1,5 +1,5 @@
 //! Fuzz targets (`fuzz/`, spec §9): bytes from the network through the WebSocket codec,
-//! permessage-deflate, the HTTP upgrade and the `/stats.json` query. Each target must never panic for any input; the
+//! permessage-deflate, the HTTP upgrade (and metrics basic auth) and the `/stats.json` query. Each target must never panic for any input; the
 //! assertions check invariants that hold for every input. Also run by `cargo test` over the seed
 //! corpus and mutations of it.
 
@@ -108,6 +108,16 @@ pub fn http_upgrade(data: &[u8]) {
             }
         }
         let _ = http::path_matches(&head.path, &head.path);
+        // Metrics listener basic auth (spec §13.7): any header value is checked without panic;
+        // only the configured credentials pass.
+        let credentials = crate::auth::Credentials::new("fuzz", "pa:ss");
+        if credentials.check(head.authorization.as_deref()) {
+            let token = head.authorization.as_deref().unwrap_or("").trim();
+            let decoded = token.split_once(' ').and_then(|(_, b64)| {
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.trim()).ok()
+            });
+            assert_eq!(decoded.as_deref(), Some(&b"fuzz:pa:ss"[..]));
+        }
         let _ = http::path_matches("/announce/*", &head.path);
         // `/stats.json?infoHash=<hex>`: one key byte per hex pair, two for pairs >= 0x80.
         if let Some((_, query)) = head.path.split_once('?')
