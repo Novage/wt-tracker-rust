@@ -376,6 +376,38 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
         &stats,
         |s| s.expired,
     );
+    if shared.listeners.iter().any(|l| l.cert.is_some()) {
+        t.family(
+            "wt_tls_reloads_total",
+            "counter",
+            "Certificate reloads of wss:// listeners (SIGHUP or a file change), by result.",
+        );
+        for l in &shared.listeners {
+            if let Some(cert) = &l.cert {
+                for (result, n) in [("ok", &cert.reloads_ok), ("error", &cert.reloads_failed)] {
+                    t.sample(
+                        "wt_tls_reloads_total",
+                        &[("listener", &l.name), ("result", &result)],
+                        n.load(Relaxed),
+                    );
+                }
+            }
+        }
+        t.family(
+            "wt_tls_certificate_expiry_seconds",
+            "gauge",
+            "notAfter of the certificate a wss:// listener serves, in Unix seconds.",
+        );
+        for l in &shared.listeners {
+            if let Some(cert) = &l.cert {
+                t.sample(
+                    "wt_tls_certificate_expiry_seconds",
+                    &[("listener", &l.name)],
+                    cert.not_after.load(Relaxed),
+                );
+            }
+        }
+    }
     t.family(
         "wt_dropped_messages_total",
         "counter",

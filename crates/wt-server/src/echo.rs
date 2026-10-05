@@ -92,7 +92,9 @@ async fn serve(tcp: TcpStream, tls: Option<Arc<ServerConfig>>) {
 /// Serves until the process ends. `tls`: PEM certificate chain and key files.
 pub fn run(addr: SocketAddr, tls: Option<(PathBuf, PathBuf)>) -> Result<(), String> {
     let config = match tls {
-        Some((cert, key)) => Some(crate::tls::server_config(&cert, &key)?),
+        Some((cert, key)) => Some(crate::tls::server_config(crate::tls::CertStore::open(
+            &cert, &key,
+        )?)?),
         None => None,
     };
     let std = std::net::TcpListener::bind(addr).map_err(|e| format!("{addr}: {e}"))?;

@@ -54,6 +54,12 @@ All notable changes to this project are listed here. The format follows
   messages and accept errors; every close with its reason at `debug`).
 - `/stats.json?infoHash=<hex>`: peers of one swarm and the workers holding it.
 - `/swarms?top=N` on the private listener: the largest swarms (hex info_hash, peers, worker).
+- Install guide for Oracle Cloud Ampere A1 (Always Free) with certbot:
+  `docs/install-oracle-ampere-a1.md`.
+- TLS certificate reload without a restart: SIGHUP, or a change of the certificate files
+  (checked every `tlsReloadInterval` seconds, default 60). Open connections and session tickets
+  stay; a key that does not match is rejected and the old certificate kept. Metrics
+  `wt_tls_reloads_total` and `wt_tls_certificate_expiry_seconds`.
 
 ### Changed
 

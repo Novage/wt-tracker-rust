@@ -150,6 +150,29 @@ fn push_timestamp(line: &mut String, time: SystemTime) {
     );
 }
 
+/// Unix seconds as RFC 3339 UTC without fractions, e.g. `2027-01-01T00:00:00Z`.
+pub(crate) fn timestamp(unix: i64) -> String {
+    let (days, rest) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest / 60 % 60,
+        rest % 60
+    )
+}
+
+/// (year, month, day) → days since 1970-01-01, the inverse of [`civil_from_days`].
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let mp = (i64::from(month) + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// Days since 1970-01-01 → (year, month, day), proleptic Gregorian (H. Hinnant's algorithm).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
@@ -261,6 +284,11 @@ mod tests {
         assert_eq!(line, "2026-10-04T12:56:42.123Z");
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        for days in [-1, 0, 11_016, 20_819, 47_000] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days);
+        }
+        assert_eq!(timestamp(1_798_761_600), "2027-01-01T00:00:00Z");
     }
 
     #[test]

@@ -133,3 +133,93 @@ async fn sigterm_shuts_the_binary_down_gracefully() {
         started.elapsed()
     );
 }
+
+/// SIGHUP reloads the certificate files of the wss:// listeners (spec §13.6): the process keeps
+/// running and its connections stay open; a second SIGHUP without changes logs `tls_unchanged`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn sighup_reloads_the_certificate_and_keeps_running() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+
+    let dir = std::env::temp_dir().join(format!("wt-sighup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert_file, key_file) = (dir.join("cert.pem"), dir.join("key.pem"));
+    let write = |cert: &rcgen::CertifiedKey<rcgen::KeyPair>| {
+        std::fs::write(&cert_file, cert.cert.pem()).unwrap();
+        std::fs::write(&key_file, cert.signing_key.serialize_pem()).unwrap();
+    };
+    write(&rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap());
+    let config = dir.join("config.json");
+    std::fs::write(
+        &config,
+        format!(
+            r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0}}}},{{"server":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{}}}}}],"workers":2,"tlsReloadInterval":0}}"#,
+            serde_json::to_string(&cert_file).unwrap(),
+            serde_json::to_string(&key_file).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wt-tracker"))
+        .arg(&config)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Log lines from a reader thread.
+    let (lines_tx, lines) = mpsc::channel::<String>();
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            if lines_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let next = |event: &str| -> String {
+        loop {
+            let line = lines
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("no {event} line"));
+            if line.contains(&format!(" event={event}")) {
+                return line;
+            }
+        }
+    };
+    let line = next("listening");
+    let addr = line.rsplit_once("addr=").unwrap().1.to_string();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+        .await
+        .unwrap();
+    send(&mut ws, &announce(H, "p1", 0)).await;
+    assert_eq!(recv(&mut ws).await.unwrap(), reply(H, 0, 1));
+
+    write(&rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap());
+    let hup = |pid: u32| {
+        let status = Command::new("kill")
+            .args(["-HUP", &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    hup(child.id());
+    let reloaded = tokio::task::block_in_place(|| next("tls_reloaded"));
+    assert!(reloaded.contains("trigger=signal"), "{reloaded}");
+    hup(child.id());
+    tokio::task::block_in_place(|| next("tls_unchanged"));
+
+    // Still the same process and connection.
+    send(&mut ws, &announce(H, "p1", 0)).await;
+    assert_eq!(recv(&mut ws).await.unwrap(), reply(H, 0, 1));
+    assert!(child.try_wait().unwrap().is_none());
+
+    let _ = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status();
+    let exit = tokio::task::spawn_blocking(move || child.wait().unwrap())
+        .await
+        .unwrap();
+    assert!(exit.success(), "{exit:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

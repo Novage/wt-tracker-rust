@@ -14,7 +14,7 @@ mod metrics;
 pub mod placement;
 mod reasons;
 mod stats;
-mod tls;
+pub mod tls;
 mod worker;
 mod ws;
 
@@ -52,6 +52,8 @@ pub(crate) struct Shared {
     /// When the server started (uptime), and as seconds since the Unix epoch (`/metrics`).
     pub started: Instant,
     pub started_unix: u64,
+    /// Seconds between checks of the certificate files (0: off).
+    pub tls_reload_interval: u64,
 }
 
 pub(crate) struct ListenerInfo {
@@ -60,6 +62,8 @@ pub(crate) struct ListenerInfo {
     pub websockets: WebSocketsConfig,
     /// wss:// when set.
     pub tls: Option<Arc<rustls::ServerConfig>>,
+    /// The certificate it serves, reloadable (wss:// only).
+    pub cert: Option<Arc<tls::CertStore>>,
     /// Open WebSocket connections on this listener, all workers.
     pub web_sockets: AtomicUsize,
 }
@@ -79,6 +83,8 @@ pub(crate) enum Phase {
 pub struct Server {
     addrs: Vec<SocketAddr>,
     metrics_addr: Option<SocketAddr>,
+    /// `(listener, certificate)` of every wss:// listener.
+    certs: Vec<(String, Arc<tls::CertStore>)>,
     workers: usize,
     shutdown: watch::Sender<Phase>,
     threads: Vec<JoinHandle<()>>,
@@ -97,6 +103,19 @@ impl Server {
 
     pub fn workers(&self) -> usize {
         self.workers
+    }
+
+    /// Reloads the certificate of every wss:// listener from its files (SIGHUP) and logs the
+    /// result; a listener whose files fail to load keeps its certificate.
+    pub fn reload_tls(&self) -> Vec<(String, tls::Reload)> {
+        self.certs
+            .iter()
+            .map(|(name, cert)| {
+                let result = cert.reload(true);
+                tls::log(name, &result, "signal");
+                (name.clone(), result)
+            })
+            .collect()
     }
 
     pub fn shutdown(self) {}
@@ -162,16 +181,18 @@ pub fn start(config: Config) -> Result<Server, String> {
                 per_worker.push(Some(bind(local, true).map_err(|e| format!("{name}: {e}"))?));
             }
         }
-        let tls = match (&s.cert_file_name, &s.key_file_name) {
-            (Some(cert), Some(key)) => Some(tls::server_config(cert, key)?),
+        let cert = match (&s.cert_file_name, &s.key_file_name) {
+            (Some(cert), Some(key)) => Some(tls::CertStore::open(cert, key)?),
             _ => None,
         };
+        let tls = cert.clone().map(tls::server_config).transpose()?;
         addrs.push(local);
         sockets.push(per_worker);
         listeners.push(ListenerInfo {
             name,
             websockets: item.websockets.clone(),
             tls,
+            cert,
             web_sockets: AtomicUsize::new(0),
         });
     }
@@ -225,7 +246,13 @@ pub fn start(config: Config) -> Result<Server, String> {
         started_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
+        tls_reload_interval: config.tls_reload_interval,
     });
+    let certs = shared
+        .listeners
+        .iter()
+        .filter_map(|l| Some((l.name.clone(), l.cert.clone()?)))
+        .collect();
 
     let (shutdown, shutdown_rx) = watch::channel(Phase::Running);
     let mut threads = Vec::new();
@@ -257,6 +284,7 @@ pub fn start(config: Config) -> Result<Server, String> {
     Ok(Server {
         addrs,
         metrics_addr,
+        certs,
         workers,
         shutdown,
         threads,

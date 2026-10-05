@@ -54,10 +54,15 @@ cargo build --release -p wt-server
 ./target/release/wt-tracker config.json
 ```
 
+**Production on Oracle Cloud's Always Free Ampere A1 with Let's Encrypt** (ports, stateless
+network rules, certbot renewals without a restart, systemd):
+[docs/install-oracle-ampere-a1.md](docs/install-oracle-ampere-a1.md).
+
 Without an argument it reads `./config.json` if present, else listens on `ws://0.0.0.0:8000` with
 the defaults. Clients connect to `ws://host:8000/` (any path by default). SIGTERM or Ctrl-C
 closes every connection with 1001 (Going Away) and exits within `shutdownTimeout` seconds; a
-second signal exits at once.
+second signal exits at once. SIGHUP reloads the TLS certificates without dropping connections
+(as does a change of the certificate files).
 
 ## Configuration
 
@@ -87,6 +92,7 @@ Settings this server adds (all optional):
 | `maxBackpressure` | 1 MiB | queued outgoing bytes per connection before messages to it are dropped |
 | `indexHtml` | `./index.html` if present | page served at `GET /` |
 | `shutdownTimeout` | `5` | seconds to wait for connections to close on SIGTERM / SIGINT |
+| `tlsReloadInterval` | `60` | seconds between checks of the certificate files; a change reloads them without a restart (0 = off) |
 | `logLevel` | `info` | `error`, `warn`, `info` or `debug` (every connection close with its reason) |
 | `metrics` | off | `{"host": "127.0.0.1", "port": 9100}`: private plain HTTP listener for Prometheus `GET /metrics` and `GET /swarms` |
 | `websockets.compressOutgoingMinSize` | `1024` | with permessage-deflate, compress outgoing messages at least this long (0 = never, like the JS tracker) |
@@ -116,6 +122,7 @@ Logs: one logfmt line per event on stderr, e.g. `level=info event=listening addr
 | `crates/wt-difftest`, `difftest/` | differential test against the JS tracker |
 | `crates/wt-loadgen`, `loadtest/` | load generator, load tests (vs JS and aquatic), Autobahn |
 | `docs/SPEC.md` | the specification: behaviour, protocol, server, tests, performance |
+| `docs/install-oracle-ampere-a1.md` | install guide: Oracle Cloud Ampere A1, certbot, systemd |
 
 ## Development
 

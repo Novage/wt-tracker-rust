@@ -1,5 +1,6 @@
 //! `wt-tracker [config.json]`: like the JS tracker, reads the given file, or `./config.json` if it
 //! exists, or uses defaults. SIGTERM / SIGINT: graceful shutdown (a second one stops at once).
+//! SIGHUP: reload the TLS certificates.
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -70,7 +71,7 @@ fn main() -> ExitCode {
         .build()
         .expect("signal runtime");
     runtime.block_on(async {
-        signal().await;
+        reload_on_hangup(&server).await;
         event!(
             Info,
             "shutting_down",
@@ -90,6 +91,31 @@ fn main() -> ExitCode {
             }
         }
     })
+}
+
+/// Until SIGINT / SIGTERM: on Unix, every SIGHUP reloads the TLS certificates (spec §13.6).
+async fn reload_on_hangup(server: &wt_server::Server) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal as unix_signal};
+        let mut hangup = unix_signal(SignalKind::hangup()).expect("SIGHUP handler");
+        let stop = signal();
+        tokio::pin!(stop);
+        loop {
+            tokio::select! {
+                _ = &mut stop => return,
+                _ = hangup.recv() => {
+                    event!(Info, "reload_requested", signal = "SIGHUP");
+                    server.reload_tls();
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = server;
+        signal().await;
+    }
 }
 
 /// SIGINT (Ctrl-C) or, on Unix, SIGTERM (docker stop, systemd).

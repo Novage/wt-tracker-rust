@@ -251,3 +251,145 @@ async fn tls_reconnects_resume_the_session() {
         "{again:?}"
     );
 }
+
+/// A blocking TLS client of the tests below: WebSocket upgrade done.
+type Tls = rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>;
+
+/// Connects with `config`; returns the stream, the leaf certificate the server sent (the
+/// original one on a resumed session) and the handshake kind.
+fn tls_connect(
+    addr: std::net::SocketAddr,
+    config: &std::sync::Arc<rustls::ClientConfig>,
+) -> (Tls, Vec<u8>, rustls::HandshakeKind) {
+    use std::io::{Read, Write};
+    let conn =
+        rustls::ClientConnection::new(config.clone(), "localhost".try_into().unwrap()).unwrap();
+    let tcp = std::net::TcpStream::connect(addr).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+    tls.write_all(HANDSHAKE.as_bytes()).unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        tls.read_exact(&mut byte).unwrap();
+        head.push(byte[0]);
+    }
+    assert!(head.starts_with(b"HTTP/1.1 101"));
+    let leaf = tls.conn.peer_certificates().unwrap()[0].to_vec();
+    let kind = tls.conn.handshake_kind().unwrap();
+    (tls, leaf, kind)
+}
+
+/// Announces on an open TLS WebSocket and reads the reply.
+fn tls_announce(tls: &mut Tls, peer_id: &str) -> String {
+    use std::io::{Read, Write};
+    tls.write_all(&frame(true, 1, announce(H, peer_id, 0).as_bytes()))
+        .unwrap();
+    let mut h = [0u8; 2];
+    tls.read_exact(&mut h).unwrap();
+    let mut payload = vec![0u8; (h[1] & 0x7f) as usize];
+    tls.read_exact(&mut payload).unwrap();
+    String::from_utf8(payload).unwrap()
+}
+
+/// The certificate is swapped while the server runs (spec §13.2): `Server::reload_tls` (SIGHUP)
+/// and a change of the files; open connections stay, tickets of the old certificate still
+/// resume, a key that does not match is rejected and the old certificate kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn tls_certificate_reloads_without_a_restart() {
+    use std::sync::Arc;
+
+    let certs: Vec<_> = (0..3)
+        .map(|_| rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap())
+        .collect();
+    let dir = std::env::temp_dir().join(format!("wt-native-reload-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert_file, key_file) = (dir.join("cert.pem"), dir.join("key.pem"));
+    let pems: Vec<(String, String)> = certs
+        .iter()
+        .map(|c| (c.cert.pem(), c.signing_key.serialize_pem()))
+        .collect();
+    let write = {
+        let (cert_file, key_file) = (cert_file.clone(), key_file.clone());
+        move |cert: usize, key: usize| {
+            std::fs::write(&cert_file, &pems[cert].0).unwrap();
+            std::fs::write(&key_file, &pems[key].1).unwrap();
+        }
+    };
+    write(0, 0);
+    let server = start(&format!(
+        r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{}}}}}],"workers":2,"tlsReloadInterval":1}}"#,
+        serde_json::to_string(&cert_file).unwrap(),
+        serde_json::to_string(&key_file).unwrap()
+    ));
+    let addr = server.local_addrs()[0];
+    let der: Vec<Vec<u8>> = certs.iter().map(|c| c.cert.der().to_vec()).collect();
+    let mut roots = rustls::RootCertStore::empty();
+    for c in &certs {
+        roots.add(c.cert.der().clone()).unwrap();
+    }
+    let client = move || {
+        Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots.clone())
+            .with_no_client_auth(),
+        )
+    };
+    let server = Arc::new(server);
+    let reload = {
+        let server = server.clone();
+        move || server.reload_tls().remove(0).1
+    };
+    let open = tokio::task::spawn_blocking(move || {
+        use wt_server::tls::Reload;
+        let served = || tls_connect(addr, &client()).1;
+
+        // Certificate 0; this client keeps a ticket and a connection.
+        let returning = client();
+        let (mut open, leaf, _) = tls_connect(addr, &returning);
+        assert_eq!(leaf, der[0]);
+        assert!(tls_announce(&mut open, "p-open").contains("interval"));
+
+        // Certificate 1 by reload (the file watcher may have taken it already).
+        write(1, 1);
+        let result = reload();
+        assert!(
+            matches!(result, Reload::Reloaded { .. } | Reload::Unchanged),
+            "{result:?}"
+        );
+        assert_eq!(served(), der[1]);
+        // The connection from before the reload still works, and the old ticket resumes.
+        assert!(tls_announce(&mut open, "p-open").contains("interval"));
+        assert_eq!(
+            tls_connect(addr, &returning).2,
+            rustls::HandshakeKind::Resumed
+        );
+
+        // Certificate 2 with the key of 1: rejected, certificate 1 stays.
+        write(2, 1);
+        assert!(matches!(reload(), Reload::Failed(_)));
+        assert_eq!(served(), der[1]);
+
+        // Certificate 2 with its key: the file watcher (every second) picks it up by itself.
+        write(2, 2);
+        let deadline = std::time::Instant::now() + WAIT;
+        while served() != der[2] {
+            assert!(std::time::Instant::now() < deadline, "not reloaded");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        open
+    })
+    .await
+    .unwrap();
+
+    let m = metrics(&server).await;
+    assert_eq!(m.sum("wt_tls_reloads_total", &[("result", "ok")]), 2);
+    assert!(m.sum("wt_tls_reloads_total", &[("result", "error")]) >= 1);
+    assert!(m.sum("wt_tls_certificate_expiry_seconds", &[]) > 1_700_000_000);
+    drop(open);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

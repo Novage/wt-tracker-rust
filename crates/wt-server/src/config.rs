@@ -35,6 +35,10 @@ pub struct Config {
     /// connections move to them, spec §13.3) or `hash` (`foldhash(info_hash) % workers`).
     #[serde(default)]
     pub placement: Option<String>,
+    /// Seconds between checks of the TLS certificate files; a change reloads them without a
+    /// restart (spec §13.2). 0 = off (SIGHUP still reloads).
+    #[serde(default = "default_tls_reload_interval")]
+    pub tls_reload_interval: u64,
     /// `error`, `warn`, `info` (default) or `debug` (spec §13.8).
     #[serde(default)]
     pub log_level: Option<String>,
@@ -125,6 +129,9 @@ pub struct AccessConfig {
 
 fn default_servers() -> Vec<ServerItem> {
     vec![ServerItem::default()]
+}
+fn default_tls_reload_interval() -> u64 {
+    60
 }
 fn default_metrics_host() -> String {
     "127.0.0.1".into()
