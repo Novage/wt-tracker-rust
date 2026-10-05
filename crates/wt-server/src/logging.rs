@@ -34,7 +34,9 @@ impl Level {
     }
 }
 
-static LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
+/// `warn` until [`init`] sets the configured level (the binary always calls it; in-process use,
+/// e.g. tests, stays quiet).
+static LEVEL: AtomicU8 = AtomicU8::new(Level::Warn as u8);
 static TIMESTAMPS: AtomicBool = AtomicBool::new(true);
 
 /// A rate-limited event is written at most once per this interval per worker thread.
@@ -77,8 +79,9 @@ pub fn write(level: Level, event: &str, fields: &[(&str, &dyn fmt::Display)], su
         let _ = write!(line, " suppressed={suppressed}");
     }
     line.push('\n');
-    // One write per line (and captured by the test harness).
-    eprint!("{line}");
+    // One write per line. Errors are ignored: a log line must never stop the tracker (`eprint!`
+    // panics when stderr is closed).
+    let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
 }
 
 /// Rate limit per worker thread: `Some(skipped)` if `event` may be written now.

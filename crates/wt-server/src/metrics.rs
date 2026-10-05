@@ -398,13 +398,17 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
             "gauge",
             "notAfter of the certificate a wss:// listener serves, in Unix seconds.",
         );
+        // No sample for a certificate whose notAfter could not be parsed: a 0 would look expired.
         for l in &shared.listeners {
             if let Some(cert) = &l.cert {
-                t.sample(
-                    "wt_tls_certificate_expiry_seconds",
-                    &[("listener", &l.name)],
-                    cert.not_after.load(Relaxed),
-                );
+                let not_after = cert.not_after.load(Relaxed);
+                if not_after != crate::tls::UNKNOWN {
+                    t.sample(
+                        "wt_tls_certificate_expiry_seconds",
+                        &[("listener", &l.name)],
+                        not_after,
+                    );
+                }
             }
         }
     }

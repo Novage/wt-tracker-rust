@@ -14,7 +14,7 @@ mod metrics;
 pub mod placement;
 mod reasons;
 mod stats;
-pub mod tls;
+mod tls;
 mod worker;
 mod ws;
 
@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, watch};
 
 pub use config::Config;
 use config::{AccessConfig, WebSocketsConfig};
+pub use tls::Reload;
 use worker::{Event, WorkerListener};
 
 /// State shared by all workers (read-only after start, plus atomics).
@@ -107,7 +108,7 @@ impl Server {
 
     /// Reloads the certificate of every wss:// listener from its files (SIGHUP) and logs the
     /// result; a listener whose files fail to load keeps its certificate.
-    pub fn reload_tls(&self) -> Vec<(String, tls::Reload)> {
+    pub fn reload_tls(&self) -> Vec<(String, Reload)> {
         self.certs
             .iter()
             .map(|(name, cert)| {

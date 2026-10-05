@@ -15,13 +15,16 @@ use rustls::sign::CertifiedKey;
 /// What a reload did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reload {
-    /// A new certificate is served; its `notAfter` in Unix seconds.
-    Reloaded { not_after: i64 },
+    /// A new certificate is served; its `notAfter` in Unix seconds (`None`: not parsed).
+    Reloaded { not_after: Option<i64> },
     /// The files did not change (or hold the certificate already served).
     Unchanged,
     /// The files could not be loaded; the previous certificate is still served.
     Failed(String),
 }
+
+/// `CertStore::not_after` of a certificate whose `notAfter` could not be parsed.
+pub(crate) const UNKNOWN: i64 = i64::MIN;
 
 /// Modification time and length of both files (following symlinks): a change starts a reload.
 type Stamp = Option<[(SystemTime, u64); 2]>;
@@ -29,15 +32,15 @@ type Stamp = Option<[(SystemTime, u64); 2]>;
 /// The certificate of a listener, read from its PEM files, swapped on reload. rustls asks it for
 /// the certificate on every full handshake, so the TLS config (and its session ticket keys)
 /// stays the same across reloads.
-pub struct CertStore {
+pub(crate) struct CertStore {
     cert_file: PathBuf,
     key_file: PathBuf,
     current: RwLock<Arc<CertifiedKey>>,
     seen: Mutex<Stamp>,
-    /// `notAfter` of the served certificate (Unix seconds; 0 if not parsed).
-    pub not_after: AtomicI64,
-    pub reloads_ok: AtomicU64,
-    pub reloads_failed: AtomicU64,
+    /// `notAfter` of the served certificate (Unix seconds; [`UNKNOWN`] if not parsed).
+    pub(crate) not_after: AtomicI64,
+    pub(crate) reloads_ok: AtomicU64,
+    pub(crate) reloads_failed: AtomicU64,
 }
 
 impl std::fmt::Debug for CertStore {
@@ -51,7 +54,7 @@ impl std::fmt::Debug for CertStore {
 
 impl CertStore {
     /// Loads the certificate chain and key; fails if they cannot be used together.
-    pub fn open(cert_file: &Path, key_file: &Path) -> Result<Arc<Self>, String> {
+    pub(crate) fn open(cert_file: &Path, key_file: &Path) -> Result<Arc<Self>, String> {
         let seen = stamp(cert_file, key_file);
         let (key, not_after) = load(cert_file, key_file)?;
         Ok(Arc::new(Self {
@@ -59,7 +62,7 @@ impl CertStore {
             key_file: key_file.to_path_buf(),
             current: RwLock::new(Arc::new(key)),
             seen: Mutex::new(seen),
-            not_after: AtomicI64::new(not_after),
+            not_after: AtomicI64::new(not_after.unwrap_or(UNKNOWN)),
             reloads_ok: AtomicU64::new(0),
             reloads_failed: AtomicU64::new(0),
         }))
@@ -67,15 +70,17 @@ impl CertStore {
 
     /// Reloads if the files changed since the last attempt (`force`: in any case). A missing
     /// file without `force` waits for the next check (a renewal may be replacing it).
-    pub fn reload(&self, force: bool) -> Reload {
+    ///
+    /// Reloads run one at a time (the file watcher on worker 0 and SIGHUP on the main thread):
+    /// the `seen` lock is held from reading the stamp to installing the certificate, so a slower
+    /// reload of older files can never finish after a newer one and put the old certificate back.
+    pub(crate) fn reload(&self, force: bool) -> Reload {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
         let now = stamp(&self.cert_file, &self.key_file);
-        {
-            let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-            if !force && (now.is_none() || *seen == now) {
-                return Reload::Unchanged;
-            }
-            *seen = now;
+        if !force && (now.is_none() || *seen == now) {
+            return Reload::Unchanged;
         }
+        *seen = now;
         match load(&self.cert_file, &self.key_file) {
             Ok((key, not_after)) => {
                 let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
@@ -83,7 +88,7 @@ impl CertStore {
                     return Reload::Unchanged;
                 }
                 *current = Arc::new(key);
-                self.not_after.store(not_after, Relaxed);
+                self.not_after.store(not_after.unwrap_or(UNKNOWN), Relaxed);
                 self.reloads_ok.fetch_add(1, Relaxed);
                 Reload::Reloaded { not_after }
             }
@@ -114,8 +119,9 @@ fn stamp(cert_file: &Path, key_file: &Path) -> Stamp {
     Some([one(cert_file)?, one(key_file)?])
 }
 
-/// The chain and key from PEM files, checked to belong together, and the leaf's `notAfter`.
-fn load(cert_file: &Path, key_file: &Path) -> Result<(CertifiedKey, i64), String> {
+/// The chain and key from PEM files, checked to belong together, and the leaf's `notAfter`
+/// (`None` if it could not be parsed).
+fn load(cert_file: &Path, key_file: &Path) -> Result<(CertifiedKey, Option<i64>), String> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_file)
         .and_then(|certs| certs.collect())
         .map_err(|e| format!("{}: {e}", cert_file.display()))?;
@@ -124,14 +130,14 @@ fn load(cert_file: &Path, key_file: &Path) -> Result<(CertifiedKey, i64), String
     }
     let key = PrivateKeyDer::from_pem_file(key_file)
         .map_err(|e| format!("{}: {e}", key_file.display()))?;
-    let not_after = not_after(&certs[0]).unwrap_or(0);
+    let not_after = not_after(&certs[0]);
     let key = CertifiedKey::from_der(certs, key, &rustls::crypto::ring::default_provider())
         .map_err(|e| format!("TLS certificate/key: {e}"))?;
     Ok((key, not_after))
 }
 
 /// rustls server config serving the store's certificate.
-pub fn server_config(store: Arc<CertStore>) -> Result<Arc<ServerConfig>, String> {
+pub(crate) fn server_config(store: Arc<CertStore>) -> Result<Arc<ServerConfig>, String> {
     let mut config =
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()
@@ -149,13 +155,13 @@ pub fn server_config(store: Arc<CertStore>) -> Result<Arc<ServerConfig>, String>
 }
 
 /// Logs a reload of `listener` (spec §13.8). `trigger`: `signal` or `file`.
-pub fn log(listener: &str, result: &Reload, trigger: &str) {
+pub(crate) fn log(listener: &str, result: &Reload, trigger: &str) {
     match result {
         Reload::Reloaded { not_after } => crate::event!(
             Info,
             "tls_reloaded",
             listener = listener,
-            not_after = crate::logging::timestamp(*not_after),
+            not_after = not_after.map_or_else(|| "unknown".into(), crate::logging::timestamp),
             trigger = trigger
         ),
         Reload::Unchanged if trigger == "signal" => {
@@ -265,7 +271,7 @@ mod tests {
         assert_eq!(
             store.reload(false),
             Reload::Reloaded {
-                not_after: 2_571_696_000
+                not_after: Some(2_571_696_000)
             }
         );
         assert_eq!(served(&store), *b.der());
@@ -286,6 +292,46 @@ mod tests {
             ),
             (1, 1)
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A reload keeps its lock until the certificate is installed (the SIGHUP and the file
+    /// watcher run on different threads), so the newer files are always installed last.
+    #[test]
+    fn reloads_run_one_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("wt-tls-serial-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (cert_file, key_file) = (dir.join("cert.pem"), dir.join("key.pem"));
+        let (a, ka) = cert((2027, 1, 1));
+        std::fs::write(&cert_file, a.pem()).unwrap();
+        std::fs::write(&key_file, ka.serialize_pem()).unwrap();
+        let store = CertStore::open(&cert_file, &key_file).unwrap();
+        let (b, kb) = cert((2051, 6, 30));
+        std::fs::write(&cert_file, b.pem()).unwrap();
+        std::fs::write(&key_file, kb.serialize_pem()).unwrap();
+
+        // A handshake reading the certificate blocks the swap of this reload: it is stuck
+        // between loading the files and installing them, and must still hold the reload lock,
+        // so another reload (of possibly older files) cannot finish after it.
+        let handshake = store.current.read().unwrap();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let reloading = {
+            let store = store.clone();
+            std::thread::spawn(move || done_tx.send(store.reload(true)).unwrap())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            done.try_recv().is_err(),
+            "the swap should wait for the handshake"
+        );
+        assert!(
+            store.seen.try_lock().is_err(),
+            "the reload lock was released before the certificate was installed"
+        );
+        drop(handshake);
+        assert!(matches!(done.recv().unwrap(), Reload::Reloaded { .. }));
+        reloading.join().unwrap();
+        assert_eq!(store.current.read().unwrap().cert[0], *b.der());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

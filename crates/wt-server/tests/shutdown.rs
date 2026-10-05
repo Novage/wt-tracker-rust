@@ -223,3 +223,72 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
     assert!(exit.success(), "{exit:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A SIGHUP while the binary is still starting does not kill it (spec §13.6): the handler is
+/// installed before the configuration is read, and the signal becomes a reload once it runs.
+/// The configuration comes through a FIFO, so the process is provably mid-startup (blocked
+/// reading it) when the signal arrives.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn sighup_during_startup_does_not_kill_the_process() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let dir = std::env::temp_dir().join(format!("wt-early-hup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fifo = dir.join("config.json");
+    let _ = std::fs::remove_file(&fifo);
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_wt-tracker"))
+        .arg(&fifo)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The process blocks opening the FIFO until a writer appears.
+    std::thread::sleep(Duration::from_millis(500));
+    let status = Command::new("kill")
+        .args(["-HUP", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "SIGHUP during startup killed the process"
+    );
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fifo)
+        .unwrap()
+        .write_all(br#"{"servers":[{"server":{"host":"127.0.0.1","port":0}}],"workers":1}"#)
+        .unwrap();
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    let lines = tokio::task::spawn_blocking(move || {
+        stderr
+            .lines()
+            .map_while(Result::ok)
+            .take_while(|l| !l.contains(" event=reload_requested"))
+            .collect::<Vec<_>>()
+    });
+    let lines = tokio::time::timeout(WAIT, lines)
+        .await
+        .expect("the early SIGHUP was not handled as a reload")
+        .unwrap();
+    assert!(
+        lines.iter().any(|l| l.contains(" event=started")),
+        "{lines:?}"
+    );
+    assert!(child.try_wait().unwrap().is_none());
+    let _ = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status();
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

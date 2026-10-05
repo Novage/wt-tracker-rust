@@ -345,7 +345,7 @@ async fn tls_certificate_reloads_without_a_restart() {
         move || server.reload_tls().remove(0).1
     };
     let open = tokio::task::spawn_blocking(move || {
-        use wt_server::tls::Reload;
+        use wt_server::Reload;
         let served = || tls_connect(addr, &client()).1;
 
         // Certificate 0; this client keeps a ticket and a connection.

@@ -995,7 +995,8 @@ pub(crate) fn run(
             let socket = TcpListener::from_std(socket).expect("metrics listener");
             accepting.push(spawn_local(crate::metrics::accept_loop(me.clone(), socket)));
         }
-        if id == 0 && me.shared.tls_reload_interval > 0 {
+        let has_tls = me.shared.listeners.iter().any(|l| l.cert.is_some());
+        if id == 0 && has_tls && me.shared.tls_reload_interval > 0 {
             spawn_local(me.clone().watch_certificates());
         }
         let Ok(Phase::Drain(deadline)) = phase.wait_for(|p| *p != Phase::Running).await.map(|p| *p)

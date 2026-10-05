@@ -8,6 +8,16 @@ use std::time::Duration;
 use wt_server::{Config, event};
 
 fn main() -> ExitCode {
+    // The SIGHUP handler first: until a handler is installed, SIGHUP terminates the process, and
+    // systemd sees that as a clean exit (`Restart=on-failure` would not start it again). A
+    // SIGHUP during startup (e.g. `systemctl reload` right after a start) is kept and handled as
+    // a reload once the server runs.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("signal runtime");
+    let hangup = Hangup::install(&runtime);
+
     let (path, read) = match std::env::args().nth(1) {
         Some(path) => {
             let read = std::fs::read_to_string(&path);
@@ -66,12 +76,8 @@ fn main() -> ExitCode {
         placement = placement
     );
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("signal runtime");
     runtime.block_on(async {
-        reload_on_hangup(&server).await;
+        reload_on_hangup(&server, hangup).await;
         event!(
             Info,
             "shutting_down",
@@ -93,12 +99,25 @@ fn main() -> ExitCode {
     })
 }
 
+/// The SIGHUP handler (Unix), installed before anything else.
+struct Hangup(#[cfg(unix)] tokio::signal::unix::Signal);
+
+impl Hangup {
+    fn install(runtime: &tokio::runtime::Runtime) -> Self {
+        let _context = runtime.enter();
+        Self(
+            #[cfg(unix)]
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("SIGHUP handler"),
+        )
+    }
+}
+
 /// Until SIGINT / SIGTERM: on Unix, every SIGHUP reloads the TLS certificates (spec §13.6).
-async fn reload_on_hangup(server: &wt_server::Server) {
+async fn reload_on_hangup(server: &wt_server::Server, hangup: Hangup) {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal as unix_signal};
-        let mut hangup = unix_signal(SignalKind::hangup()).expect("SIGHUP handler");
+        let Hangup(mut hangup) = hangup;
         let stop = signal();
         tokio::pin!(stop);
         loop {
@@ -113,7 +132,7 @@ async fn reload_on_hangup(server: &wt_server::Server) {
     }
     #[cfg(not(unix))]
     {
-        let _ = server;
+        let _ = (server, hangup);
         signal().await;
     }
 }
