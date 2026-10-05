@@ -62,7 +62,7 @@ Without an argument it reads `./config.json` if present, else listens on `ws://0
 the defaults. Clients connect to `ws://host:8000/` (any path by default). SIGTERM or Ctrl-C
 closes every connection with 1001 (Going Away) and exits within `shutdownTimeout` seconds; a
 second signal exits at once. SIGHUP reloads the TLS certificates without dropping connections
-(as does a change of the certificate files).
+(have your renewal tool send it, e.g. `systemctl reload`).
 
 ## Configuration
 
@@ -92,7 +92,6 @@ Settings this server adds (all optional):
 | `maxBackpressure` | 1 MiB | queued outgoing bytes per connection before messages to it are dropped |
 | `indexHtml` | `./index.html` if present | page served at `GET /` |
 | `shutdownTimeout` | `5` | seconds to wait for connections to close on SIGTERM / SIGINT |
-| `tlsReloadInterval` | `60` | seconds between checks of the certificate files; a change reloads them without a restart (0 = off) |
 | `logLevel` | `info` | `error`, `warn`, `info` or `debug` (every connection close with its reason) |
 | `metrics` | off | `{"host": "127.0.0.1", "port": 9100}`: private plain HTTP listener for Prometheus `GET /metrics` and `GET /swarms` |
 | `websockets.compressOutgoingMinSize` | `1024` | with permessage-deflate, compress outgoing messages at least this long (0 = never, like the JS tracker) |

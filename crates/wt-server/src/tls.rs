@@ -1,11 +1,10 @@
 //! wss:// listeners: rustls server config whose certificate can be reloaded from its PEM files
-//! while the server runs (SIGHUP or a file change, spec §13.2).
+//! while the server runs (SIGHUP, spec §13.2).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime};
 
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
@@ -22,24 +21,6 @@ pub enum Reload {
     Unchanged,
     /// The files could not be loaded; the previous certificate is still served.
     Failed(String),
-}
-
-/// What starts a reload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Trigger {
-    /// SIGHUP: always reads the files.
-    Signal,
-    /// The file watcher: reads the files only after they changed.
-    File,
-}
-
-impl Trigger {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Signal => "signal",
-            Self::File => "file",
-        }
-    }
 }
 
 /// The TLS side of a wss:// listener.
@@ -59,9 +40,6 @@ impl Tls {
     }
 }
 
-/// Modification time and length of both files (following symlinks): a change starts a reload.
-type Stamp = Option<[(SystemTime, u64); 2]>;
-
 /// The served certificate and its `notAfter` (Unix seconds; `None` if not parsed).
 struct Served {
     key: Arc<CertifiedKey>,
@@ -75,8 +53,6 @@ pub(crate) struct CertStore {
     cert_file: PathBuf,
     key_file: PathBuf,
     served: RwLock<Served>,
-    /// The files' stamp when they were first loaded (the watcher starts from it).
-    opened: Stamp,
     pub(crate) reloads_ok: AtomicU64,
     pub(crate) reloads_failed: AtomicU64,
 }
@@ -92,13 +68,11 @@ impl std::fmt::Debug for CertStore {
 
 impl CertStore {
     fn open(cert_file: &Path, key_file: &Path) -> Result<Arc<Self>, String> {
-        let opened = stamp(cert_file, key_file);
         let served = load(cert_file, key_file)?;
         Ok(Arc::new(Self {
             cert_file: cert_file.to_path_buf(),
             key_file: key_file.to_path_buf(),
             served: RwLock::new(served),
-            opened,
             reloads_ok: AtomicU64::new(0),
             reloads_failed: AtomicU64::new(0),
         }))
@@ -112,81 +86,28 @@ impl CertStore {
             .not_after
     }
 
-    fn stamp(&self) -> Stamp {
-        stamp(&self.cert_file, &self.key_file)
-    }
-
-    /// Loads the files and serves them if they hold another certificate. Not counted or logged
-    /// ([`Watch::run`] decides). The comparison and the swap are separate steps: only the
-    /// reload thread calls this.
-    fn swap_in(&self) -> Reload {
+    /// Loads the files and serves them if they hold another certificate; counts the result.
+    /// The comparison and the swap happen under one write lock. The files are read outside it
+    /// (handshakes must not wait for file I/O), so the order of reloads, newer files last, comes
+    /// from calling this only on the reload thread.
+    fn reload(&self) -> Reload {
         match load(&self.cert_file, &self.key_file) {
             Ok(served) => {
-                let unchanged = {
-                    let current = self.served.read().unwrap_or_else(|e| e.into_inner());
-                    current.key.cert == served.key.cert
-                };
-                if unchanged {
+                let mut current = self.served.write().unwrap_or_else(|e| e.into_inner());
+                if current.key.cert == served.key.cert {
                     return Reload::Unchanged;
                 }
                 let not_after = served.not_after;
-                *self.served.write().unwrap_or_else(|e| e.into_inner()) = served;
+                *current = served;
+                drop(current);
+                self.reloads_ok.fetch_add(1, Relaxed);
                 Reload::Reloaded { not_after }
             }
-            Err(e) => Reload::Failed(e),
-        }
-    }
-}
-
-/// The reload thread's state for one certificate.
-struct Watch {
-    /// Stamp of the files last loaded (or found to hold the served certificate).
-    seen: Stamp,
-    /// Stamp of files that failed to load, and whether that failure was reported.
-    failed: Option<(Stamp, bool)>,
-}
-
-impl Watch {
-    fn new(cert: &CertStore) -> Self {
-        Self {
-            seen: cert.opened,
-            failed: None,
-        }
-    }
-
-    /// One reload of `cert`, counted in its metrics; the result to log, or `None` when there is
-    /// nothing to report.
-    ///
-    /// - [`Trigger::Signal`] always reads the files and reports a failure at once.
-    /// - [`Trigger::File`] reads them when their stamp changed, or again on every check after
-    ///   a failure (a read may have caught a file mid-write, and the finished file can have the
-    ///   same stamp). A failure is reported only when the same files fail on two checks in a
-    ///   row, so a renewal caught between replacing the key and the certificate is not one. A
-    ///   missing file waits for the next check (a renewal may be replacing it).
-    fn run(&mut self, cert: &CertStore, trigger: Trigger) -> Option<Reload> {
-        let now = cert.stamp();
-        let failed_before = matches!(self.failed, Some((stamp, _)) if stamp == now);
-        if trigger == Trigger::File && (now.is_none() || (now == self.seen && !failed_before)) {
-            return None;
-        }
-        let result = cert.swap_in();
-        match &result {
-            Reload::Failed(_) => {
-                let reported = failed_before && matches!(self.failed, Some((_, true)));
-                let report = !reported && (trigger == Trigger::Signal || failed_before);
-                self.failed = Some((now, reported || report));
-                if !report {
-                    return None;
-                }
-                cert.reloads_failed.fetch_add(1, Relaxed);
+            Err(e) => {
+                self.reloads_failed.fetch_add(1, Relaxed);
+                Reload::Failed(e)
             }
-            Reload::Reloaded { .. } => {
-                (self.seen, self.failed) = (now, None);
-                cert.reloads_ok.fetch_add(1, Relaxed);
-            }
-            Reload::Unchanged => (self.seen, self.failed) = (now, None),
         }
-        Some(result)
     }
 }
 
@@ -200,14 +121,6 @@ impl ResolvesServerCert for CertStore {
                 .clone(),
         )
     }
-}
-
-fn stamp(cert_file: &Path, key_file: &Path) -> Stamp {
-    let one = |path: &Path| {
-        let meta = std::fs::metadata(path).ok()?;
-        Some((meta.modified().ok()?, meta.len()))
-    };
-    Some([one(cert_file)?, one(key_file)?])
 }
 
 /// The chain and key from PEM files, checked to belong together, and the leaf's `notAfter`.
@@ -253,56 +166,28 @@ type Results = Vec<(String, Reload)>;
 /// A reload request; `Some`: send the results back.
 type Request = Option<mpsc::Sender<Results>>;
 
-/// Reloads the certificates of the wss:// listeners on one thread (`wt-tls`), off the workers:
-/// on request ([`Reloader::reload`], [`Reloader::request`]: SIGHUP) and, every `interval`
-/// (zero: never), when their files changed. Being the only thread that reloads, it installs
-/// newer files last. The thread ends when the `Reloader` is dropped.
+/// Reloads the certificates of the wss:// listeners on one thread (`wt-tls`), off the workers,
+/// on request ([`Reloader::reload`], [`Reloader::request`]: SIGHUP). Being the only thread
+/// that reloads, it installs newer files last. The thread ends when the `Reloader` is dropped.
 pub(crate) struct Reloader(mpsc::Sender<Request>);
 
 impl Reloader {
-    pub(crate) fn spawn(
-        certs: Vec<(String, Arc<CertStore>)>,
-        interval: Duration,
-    ) -> std::io::Result<Self> {
+    pub(crate) fn spawn(certs: Vec<(String, Arc<CertStore>)>) -> std::io::Result<Self> {
         let (requests, rx) = mpsc::channel::<Request>();
         std::thread::Builder::new()
             .name("wt-tls".into())
             .spawn(move || {
-                let mut watches: Vec<Watch> = certs.iter().map(|(_, c)| Watch::new(c)).collect();
-                let mut reload_all = |trigger: Trigger| -> Results {
-                    certs
+                for reply in rx {
+                    let results: Results = certs
                         .iter()
-                        .zip(&mut watches)
-                        .filter_map(|((name, cert), watch)| {
-                            let result = watch.run(cert, trigger)?;
-                            log(name, &result, trigger);
-                            Some((name.clone(), result))
+                        .map(|(name, cert)| {
+                            let result = cert.reload();
+                            log(name, &result);
+                            (name.clone(), result)
                         })
-                        .collect()
-                };
-                // `None`: no periodic check (interval zero, or too far to represent).
-                let next = || match interval.is_zero() {
-                    true => None,
-                    false => Instant::now().checked_add(interval),
-                };
-                let mut check = next();
-                loop {
-                    let request = match check {
-                        None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-                        Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
-                    };
-                    match request {
-                        Ok(reply) => {
-                            let results = reload_all(Trigger::Signal);
-                            if let Some(reply) = reply {
-                                let _ = reply.send(results);
-                            }
-                        }
-                        Err(RecvTimeoutError::Timeout) => {
-                            reload_all(Trigger::File);
-                            check = next();
-                        }
-                        Err(RecvTimeoutError::Disconnected) => return,
+                        .collect();
+                    if let Some(reply) = reply {
+                        let _ = reply.send(results);
                     }
                 }
             })?;
@@ -341,25 +226,20 @@ fn stopped() {
 }
 
 /// Logs a reload of `listener` (spec §13.8).
-fn log(listener: &str, result: &Reload, trigger: Trigger) {
+fn log(listener: &str, result: &Reload) {
     match result {
         Reload::Reloaded { not_after } => crate::event!(
             Info,
             "tls_reloaded",
             listener = listener,
-            not_after = not_after.map_or_else(|| "unknown".into(), crate::logging::timestamp),
-            trigger = trigger.as_str()
+            not_after = not_after.map_or_else(|| "unknown".into(), crate::logging::timestamp)
         ),
-        Reload::Unchanged if trigger == Trigger::Signal => {
-            crate::event!(Info, "tls_unchanged", listener = listener)
-        }
-        Reload::Unchanged => {}
+        Reload::Unchanged => crate::event!(Info, "tls_unchanged", listener = listener),
         Reload::Failed(error) => crate::event!(
             Error,
             "tls_reload_failed",
             listener = listener,
-            error = error,
-            trigger = trigger.as_str()
+            error = error
         ),
     }
 }
@@ -483,112 +363,26 @@ mod tests {
         files.cert(&a);
         files.key(&ka);
         let store = CertStore::open(&files.cert, &files.key).unwrap();
-        let mut watch = Watch::new(&store);
         assert_eq!(served(&store), *a.der());
-        assert_eq!(watch.run(&store, Trigger::File), None, "files unchanged");
-        assert_eq!(
-            watch.run(&store, Trigger::Signal),
-            Some(Reload::Unchanged),
-            "same certificate"
-        );
+        assert_eq!(store.reload(), Reload::Unchanged, "same certificate");
 
         files.cert(&b);
         files.key(&kb);
         assert_eq!(
-            watch.run(&store, Trigger::File),
-            Some(Reload::Reloaded {
+            store.reload(),
+            Reload::Reloaded {
                 not_after: Some(2_571_696_000)
-            })
+            }
         );
         assert_eq!(served(&store), *b.der());
         assert_eq!(store.not_after(), Some(2_571_696_000));
-        assert_eq!(counts(&store), (1, 0));
-    }
 
-    /// A check between the replacement of the key and of the certificate (a normal renewal)
-    /// is not a failure: retried on the next check, not counted.
-    #[test]
-    fn a_half_replaced_pair_is_retried_and_not_reported() {
-        let files = Files::new("half");
-        let ((a, ka), (b, kb)) = (cert((2027, 1, 1)), cert((2051, 6, 30)));
+        // A new certificate with the old key: rejected and reported on every reload, b stays.
         files.cert(&a);
-        files.key(&ka);
-        let store = CertStore::open(&files.cert, &files.key).unwrap();
-        let mut watch = Watch::new(&store);
-        files.key(&kb);
-        assert_eq!(
-            watch.run(&store, Trigger::File),
-            None,
-            "first failure: retry"
-        );
-        files.cert(&b);
-        assert!(matches!(
-            watch.run(&store, Trigger::File),
-            Some(Reload::Reloaded { .. })
-        ));
-        assert_eq!(counts(&store), (1, 0));
-    }
-
-    /// Files that keep failing are reported once (on the second check) and read again on every
-    /// check, even with an unchanged stamp: a file fixed in place with the same length and
-    /// modification time is still picked up.
-    #[test]
-    fn a_lasting_failure_is_reported_once_and_retried_every_check() {
-        let files = Files::new("lasting");
-        let (a, ka) = cert((2027, 1, 1));
-        files.cert(&a);
-        files.key(&ka);
-        let store = CertStore::open(&files.cert, &files.key).unwrap();
-        let mut watch = Watch::new(&store);
-        // Same length, no certificate in it.
-        let broken = a.pem().replace("BEGIN CERTIFICATE", "BEGIN CERTIFICATX");
-        std::fs::write(&files.cert, &broken).unwrap();
-        assert_eq!(watch.run(&store, Trigger::File), None);
-        assert!(matches!(
-            watch.run(&store, Trigger::File),
-            Some(Reload::Failed(_))
-        ));
-        assert_eq!(watch.run(&store, Trigger::File), None, "reported once");
-        assert_eq!(counts(&store), (0, 1));
-        assert_eq!(served(&store), *a.der());
-
-        // Fixed in place, same length and modification time: the stamp does not change.
-        let (stamp, mtime) = (
-            store.stamp(),
-            std::fs::metadata(&files.cert).unwrap().modified().unwrap(),
-        );
-        files.cert(&a);
-        std::fs::File::options()
-            .write(true)
-            .open(&files.cert)
-            .unwrap()
-            .set_modified(mtime)
-            .unwrap();
-        assert_eq!(store.stamp(), stamp);
-        assert_eq!(
-            watch.run(&store, Trigger::File),
-            Some(Reload::Unchanged),
-            "read again although the stamp is the same"
-        );
-        assert!(watch.failed.is_none());
-    }
-
-    /// SIGHUP reports a failure at once; the watcher then does not report the same files again.
-    #[test]
-    fn a_signal_reports_a_failure_at_once() {
-        let files = Files::new("signal");
-        let ((a, ka), (b, _)) = (cert((2027, 1, 1)), cert((2051, 6, 30)));
-        files.cert(&a);
-        files.key(&ka);
-        let store = CertStore::open(&files.cert, &files.key).unwrap();
-        let mut watch = Watch::new(&store);
-        files.cert(&b);
-        assert!(matches!(
-            watch.run(&store, Trigger::Signal),
-            Some(Reload::Failed(_))
-        ));
-        assert_eq!(watch.run(&store, Trigger::File), None);
-        assert_eq!(watch.run(&store, Trigger::File), None);
-        assert_eq!(counts(&store), (0, 1));
+        for _ in 0..2 {
+            assert!(matches!(store.reload(), Reload::Failed(_)));
+        }
+        assert_eq!(served(&store), *b.der());
+        assert_eq!(counts(&store), (1, 2));
     }
 }

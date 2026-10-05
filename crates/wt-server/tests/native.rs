@@ -235,8 +235,8 @@ fn tls_announce(tls: &mut Tls, peer_id: &str) -> String {
     String::from_utf8(payload).unwrap()
 }
 
-/// The certificate is swapped while the server runs (spec §13.2): `Server::reload_tls` (SIGHUP)
-/// and a change of the files; open connections stay, tickets of the old certificate still
+/// The certificate is swapped while the server runs (spec §13.2) by `Server::reload_tls`
+/// (SIGHUP): open connections stay, tickets of the old certificate still
 /// resume, a key that does not match is rejected and the old certificate kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn tls_certificate_reloads_without_a_restart() {
@@ -261,7 +261,7 @@ async fn tls_certificate_reloads_without_a_restart() {
     };
     write(0, 0);
     let server = start(&format!(
-        r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{}}}}}],"workers":2,"tlsReloadInterval":1}}"#,
+        r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{}}}}}],"workers":2}}"#,
         serde_json::to_string(&cert_file).unwrap(),
         serde_json::to_string(&key_file).unwrap()
     ));
@@ -287,13 +287,10 @@ async fn tls_certificate_reloads_without_a_restart() {
         assert_eq!(leaf, der[0]);
         assert!(tls_announce(&mut open, "p-open").contains("interval"));
 
-        // Certificate 1 by reload (the file watcher may have taken it already).
+        // New files are served only after a reload (SIGHUP).
         write(1, 1);
-        let result = reload();
-        assert!(
-            matches!(result, Reload::Reloaded { .. } | Reload::Unchanged),
-            "{result:?}"
-        );
+        assert_eq!(served(), der[0]);
+        assert!(matches!(reload(), Reload::Reloaded { .. }));
         assert_eq!(served(), der[1]);
         // The connection from before the reload still works, and the old ticket resumes.
         assert!(tls_announce(&mut open, "p-open").contains("interval"));
@@ -302,18 +299,17 @@ async fn tls_certificate_reloads_without_a_restart() {
             rustls::HandshakeKind::Resumed
         );
 
-        // Certificate 2 with the key of 1: rejected, certificate 1 stays.
+        // Certificate 2 with the key of 1: rejected (on every reload), certificate 1 stays.
         write(2, 1);
+        assert!(matches!(reload(), Reload::Failed(_)));
         assert!(matches!(reload(), Reload::Failed(_)));
         assert_eq!(served(), der[1]);
 
-        // Certificate 2 with its key: the file watcher (every second) picks it up by itself.
+        // Fixed: the next reload serves certificate 2; the same files again are unchanged.
         write(2, 2);
-        let deadline = std::time::Instant::now() + WAIT;
-        while served() != der[2] {
-            assert!(std::time::Instant::now() < deadline, "not reloaded");
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        assert!(matches!(reload(), Reload::Reloaded { .. }));
+        assert_eq!(served(), der[2]);
+        assert_eq!(reload(), Reload::Unchanged);
         open
     })
     .await
@@ -321,7 +317,7 @@ async fn tls_certificate_reloads_without_a_restart() {
 
     let m = metrics(&server).await;
     assert_eq!(m.sum("wt_tls_reloads_total", &[("result", "ok")]), 2);
-    assert!(m.sum("wt_tls_reloads_total", &[("result", "error")]) >= 1);
+    assert_eq!(m.sum("wt_tls_reloads_total", &[("result", "error")]), 2);
     assert!(m.sum("wt_tls_certificate_expiry_seconds", &[]) > 1_700_000_000);
     drop(open);
     std::fs::remove_dir_all(&dir).unwrap();

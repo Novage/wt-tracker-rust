@@ -380,7 +380,7 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
         t.family(
             "wt_tls_reloads_total",
             "counter",
-            "Certificate reloads of wss:// listeners (SIGHUP or a file change), by result.",
+            "Certificate reloads of wss:// listeners on request (SIGHUP or Server::reload_tls), by result.",
         );
         for (name, cert) in shared.certs() {
             for (result, n) in [("ok", &cert.reloads_ok), ("error", &cert.reloads_failed)] {

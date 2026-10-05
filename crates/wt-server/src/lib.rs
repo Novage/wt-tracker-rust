@@ -262,8 +262,7 @@ pub fn start(config: Config) -> Result<Server, String> {
     let tls = if certs.is_empty() {
         None
     } else {
-        let interval = Duration::from_secs(config.tls_reload_interval);
-        Some(tls::Reloader::spawn(certs, interval).map_err(|e| e.to_string())?)
+        Some(tls::Reloader::spawn(certs).map_err(|e| e.to_string())?)
     };
 
     let (shutdown, shutdown_rx) = watch::channel(Phase::Running);

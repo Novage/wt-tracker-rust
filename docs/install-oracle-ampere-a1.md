@@ -102,11 +102,14 @@ certbot's standalone mode answers the HTTP-01 challenge on port 80 itself, so no
 listen on port 80 yet:
 
 ```bash
-sudo certbot certonly --standalone -d tracker.example.com \
+sudo certbot certonly --standalone -d tracker.example.com --cert-name tracker.example.com \
   --key-type ecdsa --agree-tos -m admin@example.com --no-eff-email
 ```
 
 The files are in `/etc/letsencrypt/live/tracker.example.com/` (`fullchain.pem`, `privkey.pem`).
+Keep `--cert-name tracker.example.com` whenever you re-issue it (other names, another key
+type): without it certbot may create a new `tracker.example.com-0001` lineage, which the
+renewal hook (section 8) would not copy.
 
 ## 6. Build
 
@@ -207,9 +210,10 @@ sudo systemd-analyze verify /etc/systemd/system/wt-tracker-rust.service
 certbot runs deploy hooks after every successful renewal of **any** certificate on the host
 (`$RENEWED_LINEAGE` is the renewed certificate's `live/` directory). This one ignores the other
 certificates (copying another domain's certificate would make every wss client fail the
-hostname check), copies the new files atomically and asks the tracker to reload them (SIGHUP through `ExecReload`); the tracker also notices changed files by itself within
-`tlsReloadInterval` (60 s). A key that does not match its certificate is rejected and the old
-certificate kept.
+hostname check), copies the new files atomically and asks the tracker to reload them (SIGHUP
+through `ExecReload`). The tracker does not watch the files: whatever renews them must reload it
+(`systemctl reload wt-tracker-rust`). A key that does not match its certificate is rejected and
+the old certificate kept.
 
 ```bash
 sudo tee /etc/letsencrypt/renewal-hooks/deploy/wt-tracker-rust.sh > /dev/null <<'EOF'
@@ -219,7 +223,10 @@ sudo tee /etc/letsencrypt/renewal-hooks/deploy/wt-tracker-rust.sh > /dev/null <<
 set -e
 lineage=/etc/letsencrypt/live/tracker.example.com
 # Deploy hooks run for every renewed certificate on the host: only the tracker's.
-[ "${RENEWED_LINEAGE:-$lineage}" = "$lineage" ] || exit 0
+if [ "${RENEWED_LINEAGE:-$lineage}" != "$lineage" ]; then
+  echo "wt-tracker-rust: $RENEWED_LINEAGE is not $lineage, not copied" >&2
+  exit 0
+fi
 src=$lineage
 dst=/etc/wt-tracker-rust/tls
 install -m 640 -g wt-tracker-tls "$src/privkey.pem" "$dst/.privkey.pem.new"
@@ -245,7 +252,7 @@ Encrypt allows only a few renewals per week for the same names):
 ```bash
 sudo certbot renew --dry-run
 sudo certbot renew --force-renewal
-sudo journalctl -u wt-tracker-rust -n 5 -o cat   # event=tls_reloaded ... trigger=signal
+sudo journalctl -u wt-tracker-rust -n 5 -o cat   # event=tls_reloaded listener=... not_after=...
 ```
 
 ## 9. Verify

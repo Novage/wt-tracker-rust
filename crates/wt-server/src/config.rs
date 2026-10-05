@@ -35,13 +35,12 @@ pub struct Config {
     /// connections move to them, spec §13.3) or `hash` (`foldhash(info_hash) % workers`).
     #[serde(default)]
     pub placement: Option<String>,
-    /// Seconds between checks of the TLS certificate files; a change reloads them without a
-    /// restart (spec §13.2). 0 = off (SIGHUP still reloads).
-    #[serde(default = "default_tls_reload_interval")]
-    pub tls_reload_interval: u64,
     /// `error`, `warn`, `info` (default) or `debug` (spec §13.8).
     #[serde(default)]
     pub log_level: Option<String>,
+    /// Removed (an earlier file watcher for the certificates): accepted with a startup warning.
+    #[serde(default)]
+    pub tls_reload_interval: Option<serde_json::Value>,
     /// Prometheus `/metrics` on a separate plain HTTP listener; off when absent (spec §13.7).
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
@@ -129,12 +128,6 @@ pub struct AccessConfig {
 
 fn default_servers() -> Vec<ServerItem> {
     vec![ServerItem::default()]
-}
-/// One day: a longer check interval is surely meant as "off" (0).
-pub const MAX_TLS_RELOAD_INTERVAL: u64 = 86_400;
-
-fn default_tls_reload_interval() -> u64 {
-    60
 }
 fn default_metrics_host() -> String {
     "127.0.0.1".into()
@@ -230,11 +223,6 @@ impl Config {
         self.tracker_settings()?;
         self.placement_mode()?;
         self.log_level()?;
-        if self.tls_reload_interval > MAX_TLS_RELOAD_INTERVAL {
-            return Err(format!(
-                "'tlsReloadInterval' must be at most {MAX_TLS_RELOAD_INTERVAL} seconds (0 = off)"
-            ));
-        }
         Ok(())
     }
 
@@ -303,6 +291,13 @@ impl Config {
                 ));
             }
         }
+        if self.tls_reload_interval.is_some() {
+            warnings.push(
+                "tlsReloadInterval was removed and is ignored: certificate files are not watched; \
+                 reload them with SIGHUP (systemctl reload)"
+                    .into(),
+            );
+        }
         warnings
     }
 }
@@ -312,12 +307,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tls_reload_interval_is_at_most_a_day() {
-        assert_eq!(Config::from_json("{}").unwrap().tls_reload_interval, 60);
-        assert!(Config::from_json(r#"{"tlsReloadInterval":0}"#).is_ok());
-        assert!(Config::from_json(r#"{"tlsReloadInterval":86400}"#).is_ok());
-        // Not "never" (that is 0): it would overflow the next check's time.
-        let e = Config::from_json(r#"{"tlsReloadInterval":18446744073709551615}"#).unwrap_err();
-        assert!(e.contains("tlsReloadInterval"), "{e}");
+    fn the_removed_tls_reload_interval_is_warned_about() {
+        assert!(Config::from_json("{}").unwrap().warnings().is_empty());
+        let warnings = Config::from_json(r#"{"tlsReloadInterval":60}"#)
+            .unwrap()
+            .warnings();
+        assert!(
+            warnings.len() == 1 && warnings[0].contains("SIGHUP"),
+            "{warnings:?}"
+        );
     }
 }

@@ -56,16 +56,17 @@ All notable changes to this project are listed here. The format follows
 - `/swarms?top=N` on the private listener: the largest swarms (hex info_hash, peers, worker).
 - Install guide for Oracle Cloud Ampere A1 (Always Free) with certbot:
   `docs/install-oracle-ampere-a1.md`.
-- TLS certificate reload without a restart: SIGHUP, or a change of the certificate files
-  (checked every `tlsReloadInterval` seconds, default 60). Open connections and session tickets
-  stay; a key that does not match is rejected and the old certificate kept. Metrics
-  `wt_tls_reloads_total` and `wt_tls_certificate_expiry_seconds`.
+- TLS certificate reload without a restart on SIGHUP (e.g. `systemctl reload` from a certbot
+  deploy hook; the files are not watched). Open connections and session tickets stay; a key
+  that does not match is rejected and the old certificate kept. Metrics `wt_tls_reloads_total`
+  and `wt_tls_certificate_expiry_seconds`.
 
 ### Changed
 
 - **Breaking:** `/stats.json` is a small summary (`torrentsCount`, `peersCount`, `servers`,
   `memory`, `workers`, `uptimeSeconds`); `peersCountPerInfoHashPerTracker`, `placement`,
-  `traffic` and `droppedMessages` moved to `/metrics`, the per-info-hash list to `/swarms`. A request no longer copies every swarm.
+  `traffic` and `droppedMessages` moved to `/metrics`, the per-info-hash list to `/swarms`. A
+  request no longer copies every swarm.
 - Startup and shutdown lines are logfmt events on stderr instead of plain text on stdout.
 
 - `compressOutgoingMinSize` now defaults to 1024: outgoing messages of at least 1 KiB (offers)

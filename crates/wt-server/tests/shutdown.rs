@@ -185,7 +185,7 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
     std::fs::write(
         &config,
         format!(
-            r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0}}}},{{"server":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{}}}}}],"workers":2,"tlsReloadInterval":0}}"#,
+            r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0}}}},{{"server":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{}}}}}],"workers":2}}"#,
             serde_json::to_string(&cert_file).unwrap(),
             serde_json::to_string(&key_file).unwrap()
         ),
@@ -238,7 +238,11 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
     write(&b);
     kill("HUP", child.id());
     let reloaded = tokio::task::block_in_place(|| next("tls_reloaded"));
-    assert!(reloaded.contains("trigger=signal"), "{reloaded}");
+    // The new certificate's expiry, parsed.
+    assert!(
+        reloaded.contains(" not_after=") && !reloaded.contains("not_after=unknown"),
+        "{reloaded}"
+    );
     // The listener really serves the new certificate.
     assert_eq!(served(), b.cert.der().to_vec());
     kill("HUP", child.id());
