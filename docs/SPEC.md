@@ -1062,9 +1062,10 @@ the hot path) and gathered as in §13.4. Families:
 Series marked Linux are read from `/proc` per scrape (CPU times in `USER_HZ` = 100 ticks per
 second); elsewhere, or if a file cannot be read, the family is left out. `monitoring/` (§2) is
 built on these series only, so a scrape of `/metrics` (job `wt-tracker`) is all it needs: the
-Grafana dashboard (data source and `job` variables) and the alert rules `TrackerDown`
-(`absent_over_time(wt_build_info[3m])`), `WorkerNotAnswering`, `WorkerCpuBusy` (> 0.9 of a core
-for 1 min), `TrackerRestarted`, `MemoryHigh` (> 1.5 GB), `FileDescriptorsNearLimit` (> 80%),
+Grafana dashboard (data source and `job` variables; rates over `$__rate_interval`, so any scrape
+interval works) and the alert rules (for scrapes every minute or faster) `TrackerDown`
+(`absent_over_time(wt_build_info[5m])`), `WorkerNotAnswering`, `WorkerCpuBusy` (> 0.9 of a core
+over 3 min), `TrackerRestarted`, `MemoryHigh` (> 1.5 GB), `FileDescriptorsNearLimit` (> 80%),
 `ListenOverflows` (> 10 per minute), `EgressPace` (24 h average of
 `wt_socket_bytes_total{direction="out"}` > 3.5 MB/s) and `CertificateExpiring` (< 14 days).
 

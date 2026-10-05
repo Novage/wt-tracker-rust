@@ -1,24 +1,25 @@
 # wt-tracker-rust alert rules (Prometheus rule format) on the tracker's /metrics, scraped as
-# job "wt-tracker". Grafana Cloud: create each rule under Alerting → Alert rules (same query,
-# threshold and pending period), or load the file into your stack's ruler with
-# `mimirtool rules load alerts.yaml`. Self-hosted Prometheus: list it under `rule_files`.
+# job "wt-tracker" every minute or faster (rate windows hold at least 3 samples at 1 minute).
+# Grafana Cloud: create each rule under Alerting → Alert rules (same query, threshold and
+# pending period), or load the file into your stack's ruler with `mimirtool rules load
+# alerts.yaml`. Self-hosted Prometheus: list it under `rule_files`.
 groups:
   - name: wt-tracker
     rules:
       - alert: TrackerDown
-        expr: absent_over_time(wt_build_info{job="wt-tracker"}[3m])
+        expr: absent_over_time(wt_build_info{job="wt-tracker"}[5m])
         annotations:
-          summary: No /metrics for 3 minutes; the tracker is down, unreachable, or its first worker is stuck.
+          summary: No /metrics for 5 minutes; the tracker is down, unreachable, or its first worker is stuck.
       - alert: WorkerNotAnswering
         expr: min(wt_worker_up{job="wt-tracker"}) < 1
         for: 2m
         annotations:
           summary: A worker has not answered the scrape within 1 s for 2 minutes (stuck or overloaded).
       - alert: WorkerCpuBusy
-        expr: max(rate(wt_worker_cpu_seconds_total{job="wt-tracker"}[1m])) > 0.9
+        expr: max(rate(wt_worker_cpu_seconds_total{job="wt-tracker"}[3m])) > 0.9
         for: 1m
         annotations:
-          summary: A worker thread uses more than 90% of a core.
+          summary: A worker thread used more than 90% of a core over the last 3 minutes.
       - alert: TrackerRestarted
         expr: changes(process_start_time_seconds{job="wt-tracker"}[10m]) > 0
         annotations:

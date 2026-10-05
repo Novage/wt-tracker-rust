@@ -47,7 +47,9 @@ exports about 100 series of its 10k limit.
 
 1. **Scrape job:** Connections → Add new connection → *Metrics Endpoint*. URL
    `https://tracker.example.com:9000/metrics`, basic auth with the username and password above,
-   scrape job name **`wt-tracker`** (the alert rules use `job="wt-tracker"`), interval 1 minute.
+   scrape job name **`wt-tracker`** (the alert rules use `job="wt-tracker"`), interval 1 minute
+   (enough for these numbers and the cheapest; the dashboard adapts its rate windows to the
+   interval, and the alert rules work from 1 minute down).
    Test the connection, then save.
 2. **Dashboard:** Dashboards → New → Import → upload `grafana-dashboard.json`, choose your
    stack's Prometheus data source.
@@ -75,9 +77,9 @@ Then import the dashboard into your Grafana as above.
 
 | Alert | Fires when | First look |
 |---|---|---|
-| TrackerDown | no `/metrics` for 3 minutes | `systemctl status wt-tracker-rust`, the journal |
+| TrackerDown | no `/metrics` for 5 minutes | `systemctl status wt-tracker-rust`, the journal |
 | WorkerNotAnswering | a worker misses the 1 s scrape deadline for 2 minutes | "CPU per worker": a worker near 100% is stuck |
-| WorkerCpuBusy | a worker thread above 90% of a core for 1 minute | load (peers) or a stuck worker |
+| WorkerCpuBusy | a worker thread above 90% of a core over 3 minutes | load (peers) or a stuck worker |
 | TrackerRestarted | the process started within 10 minutes | deploy, crash or out-of-memory kill: the journal |
 | MemoryHigh | resident memory above 1.5 GB for 5 minutes | about 15 KB per peer is normal; adjust to your server |
 | FileDescriptorsNearLimit | over 80% of the descriptor limit | raise `LimitNOFILE` |
