@@ -92,5 +92,9 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
+- A worker could hang at 100% CPU, stalling its connections until an out-of-memory kill: a
+  client whose first TLS record was larger than 8 KiB and arrived in parts left the HTTP head
+  reader looping on a readable socket it did not read, without ever yielding. Production
+  incidents on 2026-10-04, -05 and -06; caught by a watchdog's `perf` capture.
 - A message rejected by another worker's shard closed its connection with 1000 instead of 1008
   (Policy Violation), unlike a rejection by the local shard.

@@ -36,6 +36,8 @@ const TLS_BATCH: usize = 64 * 1024;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Per-connection buffers above this capacity are freed once empty.
 const KEEP_CAPACITY: usize = 4096;
+/// Largest TLS record on the wire: header, 16 KiB of plaintext and the TLS 1.2 expansion limit.
+const MAX_TLS_RECORD: usize = 5 + (1 << 14) + 2048;
 
 thread_local! {
     /// Plaintext being parsed: [partial frame of the connection][newly read bytes].
@@ -251,7 +253,11 @@ impl TlsIo {
             let mut incoming = cell.borrow_mut();
             incoming.clear();
             incoming.extend_from_slice(&self.pending_in);
-            let read = try_read_tcp(&self.tcp, &mut incoming, limit)?;
+            // `limit` bounds the plaintext; the ciphertext read must always be able to complete
+            // the pending record. Stopping before it (pending ≥ limit) decrypted nothing, left
+            // the socket readable and made the caller spin (spec §13.2).
+            let cipher_limit = limit.max(incoming.len() + MAX_TLS_RECORD);
+            let read = try_read_tcp(&self.tcp, &mut incoming, cipher_limit)?;
             let before = plain.len();
             // Always run the state machine: records decrypted earlier (e.g. app data that came
             // with the client's Finished during the handshake) wait inside the session.
@@ -430,6 +436,10 @@ impl Io {
     pub(crate) async fn read_head(&mut self) -> io::Result<(crate::http::Head, Vec<u8>)> {
         let mut buf = Vec::new();
         loop {
+            // `readable()` on a ready socket returns at once without yielding: count each pass
+            // against the task's budget, so no input can keep this loop from yielding (and the
+            // caller's timeout from firing).
+            tokio::task::consume_budget().await;
             match self.try_read(&mut buf, 8 * 1024)? {
                 Read::Data => {
                     if let Some((head, len)) = crate::http::parse_head(&buf)? {

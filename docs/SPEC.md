@@ -439,7 +439,10 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   at a time, 200 frames in one write, a 60 KB message over TLS records, the client's Finished and
   HTTP request in one TLS flight, and session resumption: after one full handshake a client
   resumes on every reconnect, even after 300 other clients' full handshakes (more than rustls'
-  default 256-entry session cache holds, which alone would force a full handshake again).
+  default 256-entry session cache holds, which alone would force a full handshake again); a
+  ~12 KiB first TLS record (a request head over the 8 KiB limit) sent as 9,000 bytes, then the
+  rest 300 ms later, is rejected and closed while the worker keeps serving `/metrics` (the
+  production stall: the old reader never closed it).
 - **Autobahn testsuite** (`loadtest/autobahn.sh`, docker image `crossbario/autobahn-testsuite`,
   fuzzing client against the `ws-echo` example over ws and wss, including the permessage-deflate
   cases 12.* / 13.*; the echo server negotiates compression and compresses every reply): no case
@@ -820,7 +823,13 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
 ### 13.2 Connections and HTTP
 
 - TCP (`TCP_NODELAY`) → optional TLS handshake → one HTTP/1.1 request head (≤ 8 KiB; TLS +
-  head within 10 s).
+  head within 10 s). The 8 KiB bound is on plaintext: over TLS each read may take ciphertext up
+  to one full record (`MAX_TLS_RECORD`, 5 + 16 KiB + 2 KiB) beyond what is pending, so a record
+  larger than the bound always completes; and every pass of the head loop counts against the
+  task's tokio budget (`consume_budget`), because `readable()` on a ready socket does not yield.
+  (Before, a client whose first record exceeded 8 KiB and arrived in parts left the reader
+  waiting on a readable socket it no longer read: the worker spun at 100% CPU without yielding,
+  its timeouts and connections stalled and its inbox grew until the OOM kill.)
 - `GET` with `Upgrade: websocket` on a matching path → `maxConnections` and origin checks (fail
   → TCP close) → `101` with `Sec-WebSocket-Accept` (requested `Sec-WebSocket-Protocol` echoed,
   like uws-tracker) and, if negotiated, `Sec-WebSocket-Extensions` (below). Bytes sent right

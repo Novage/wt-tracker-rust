@@ -322,3 +322,76 @@ async fn tls_certificate_reloads_without_a_restart() {
     drop(open);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Production stall (spec §13.2): a client's first TLS record was larger than the 8 KiB request
+/// head limit and arrived in parts. With more than 8 KiB of the incomplete record pending, the
+/// head reader stopped reading the socket, got no plaintext, waited for readability (still
+/// ready: the rest was unread) and looped without ever yielding: the worker spun at 100% CPU,
+/// its timeouts and every other connection stalled. The head (> 8 KiB) must be rejected and the
+/// worker keep serving.
+#[tokio::test(flavor = "multi_thread")]
+async fn tls_record_larger_than_the_head_limit_does_not_stall_the_worker() {
+    use std::io::{Read, Write};
+
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let dir = std::env::temp_dir().join(format!("wt-native-bighead-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert_file, key_file) = (dir.join("cert.pem"), dir.join("key.pem"));
+    std::fs::write(&cert_file, cert.cert.pem()).unwrap();
+    std::fs::write(&key_file, cert.signing_key.serialize_pem()).unwrap();
+    let server = start(&format!(
+        r#"{{"servers":[{{"server":{{"host":"127.0.0.1","port":0,"cert_file_name":{},"key_file_name":{}}}}}],"workers":1}}"#,
+        serde_json::to_string(&cert_file).unwrap(),
+        serde_json::to_string(&key_file).unwrap()
+    ));
+    let addr = server.local_addrs()[0];
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.cert.der().clone()).unwrap();
+    let config = tls_client(&roots);
+
+    let closed = tokio::task::spawn_blocking(move || {
+        let mut conn =
+            rustls::ClientConnection::new(config, "localhost".try_into().unwrap()).unwrap();
+        let mut tcp = std::net::TcpStream::connect(addr).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        while conn.is_handshaking() {
+            conn.complete_io(&mut tcp).unwrap();
+        }
+        // One ~12 KiB record: a request head over the 8 KiB limit.
+        let head = format!(
+            "GET / HTTP/1.1\r\nHost: x\r\nX-Pad: {}\r\n\r\n",
+            "a".repeat(12_000)
+        );
+        conn.writer().write_all(head.as_bytes()).unwrap();
+        let mut record = Vec::new();
+        while conn.wants_write() {
+            conn.write_tls(&mut record).unwrap();
+        }
+        assert!(record.len() > 9_000);
+        // More than 8 KiB of it first, the rest a moment later.
+        tcp.set_nodelay(true).unwrap();
+        tcp.write_all(&record[..9_000]).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        tcp.write_all(&record[9_000..]).unwrap();
+        // The server rejects the head and closes; a stalled worker never answers.
+        let mut buf = [0u8; 1024];
+        loop {
+            match tcp.read(&mut buf) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return true,
+                Err(_) => return false,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    if !closed {
+        // The stalled worker would never join: leak the server instead of hanging the test.
+        std::mem::forget(server);
+        panic!("the connection was not closed: the worker stalled");
+    }
+    // The worker still serves others.
+    assert_eq!(metrics(&server).await.sum("wt_worker_up", &[]), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
