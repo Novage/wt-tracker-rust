@@ -41,10 +41,8 @@ announce, every offer answered (`loadtest/run.sh`; full table in
 **In production** at `wss://tracker.novage.com.ua` (Oracle Ampere A1, 2 cores, real
 p2p-media-loader peers, ~42k connections): 0.35 cores and 590 MiB, against 1.46 cores and 1.9 GiB
 for aquatic_ws on the same host and load; compressing outgoing offers cut egress by ~25% at no
-measurable CPU cost ([spec §12](docs/SPEC.md#12-open-items)). Over a full day (33k peers on
-average, 47k at the daily peak): 0.82 cores per 100k peers, 15 KiB of memory per peer (690 MiB at
-the peak) and 38 B/s of egress per peer. On the free server that is about 100k peers within the
-free 10 TB of monthly egress, and about 200k for the 2 cores (estimated).
+measurable CPU cost ([spec §12](docs/SPEC.md#12-open-items)). The free server handles about 100k
+peers within its free 10 TB of monthly egress and about 200k with its 2 cores (estimated).
 
 Against [aquatic_ws](https://github.com/greatest-ape/aquatic) (Rust, io_uring) in a Linux
 container, for the same traffic, this server uses 1.8–5.4× less CPU and 4–14 KiB per connection
