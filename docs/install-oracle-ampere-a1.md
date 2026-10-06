@@ -3,7 +3,7 @@
 This guide sets up wt-tracker-rust as a public `wss://` WebTorrent tracker on an Oracle Cloud
 **Always Free** Ampere A1 instance (2 OCPU, 12 GB, aarch64), with a Let's Encrypt certificate
 from certbot that renews without restarting the tracker. The same setup runs
-`wss://tracker.novage.com.ua` (~45k peers at ~15% CPU).
+`wss://tracker.novage.com.ua` (47k peers at the daily peak, about 0.4 of one core and 690 MiB).
 
 Replace `tracker.example.com` and `admin@example.com` with your domain and email.
 
