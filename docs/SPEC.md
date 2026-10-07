@@ -1090,10 +1090,10 @@ become `event=library target=… message=…`.
 
 | Level | Events |
 |---|---|
-| error | `config_read_failed`, `config_invalid`, `start_failed` (exit 1); `accept_failed` (*limited*, e.g. EMFILE; `listener`, `error`); `tls_reload_failed` (`listener`, `error`; `listener=*` if the reload thread stopped) |
+| error | `config_read_failed`, `config_invalid`, `start_failed` (exit 1); `accept_failed` (*limited*, e.g. EMFILE; `listener`, `error`; the accept loop then waits 10 ms); `tls_reload_failed` (`listener`, `error`; `listener=*` if the reload thread stopped) |
 | warn | `config_warning` (ignored JS options; removed `tlsReloadInterval`; metrics basic auth without TLS); `worker_not_responding` (*limited*); `stopped_without_waiting` (second signal) |
 | info | `listening` (`addr`, per listener), `metrics_listening`, `started` (`version`, `workers`, `placement`); `shutting_down`, `stopped`; `reload_requested` (SIGHUP), `tls_reloaded` (`listener`, `not_after` or `unknown`), `tls_unchanged` (`listener`: the files hold the certificate already served); `rejected_message` (*limited*; `reason`, `error`, `worker`) |
-| debug | `connection_closed` (`reason` as in §13.7, `peer`, `duration_s`, `worker`) for every connection, upgraded or not; `upgrade_denied` (`reason`, `peer`); `tls_handshake_failed` (`peer`, `error`; on the metrics listener also `listener`); `unauthorized` (metrics listener: `peer`, `path`); `not_found` (`peer`, `path`) |
+| debug | `accept_aborted` (`listener`, `error`: the client ended the connection before it was accepted, ECONNABORTED / ECONNRESET; the next accept follows at once); `connection_closed` (`reason` as in §13.7, `peer`, `duration_s`, `worker`) for every connection, upgraded or not; `upgrade_denied` (`reason`, `peer`); `tls_handshake_failed` (`peer`, `error`; on the metrics listener also `listener`); `unauthorized` (metrics listener: `peer`, `path`); `not_found` (`peer`, `path`) |
 
 Until the configured level is set (`logging::init`, called by the binary after reading the
 configuration) the level is `warn`: configuration errors are written, and in-process use

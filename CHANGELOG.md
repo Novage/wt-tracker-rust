@@ -96,5 +96,7 @@ All notable changes to this project are listed here. The format follows
   client whose first TLS record was larger than 8 KiB and arrived in parts left the HTTP head
   reader looping on a readable socket it did not read, without ever yielding. Production
   incidents on 2026-10-04, -05 and -06; caught by a watchdog's `perf` capture.
+- A connection that the client ended before the server accepted it (ECONNABORTED) was logged
+  as an `accept_failed` error and paused accepting for 10 ms; it is now a debug event.
 - A message rejected by another worker's shard closed its connection with 1000 instead of 1008
   (Policy Violation), unlike a rejection by the local shard.

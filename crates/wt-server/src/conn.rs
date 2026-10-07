@@ -31,18 +31,28 @@ pub(crate) async fn accept_loop(me: Rc<Worker>, listener: usize, socket: TcpList
             Ok((stream, peer)) => {
                 spawn_local(serve(me.clone(), listener, stream, peer));
             }
-            // e.g. EMFILE: back off instead of spinning.
-            Err(e) => {
-                crate::event_limited!(
-                    Error,
-                    "accept_failed",
-                    listener = me.shared.listeners[listener].name,
-                    error = e
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            Err(e) => accept_failed(&me.shared.listeners[listener].name, e).await,
         }
     }
+}
+
+/// A failed `accept`. A connection the client ended before it was accepted (ECONNABORTED,
+/// ECONNRESET) concerns only that connection: a debug event, and the next accept at once. Other
+/// errors (e.g. EMFILE) are logged as errors, and the loop waits 10 ms instead of spinning.
+pub(crate) async fn accept_failed(listener: &str, e: std::io::Error) {
+    if client_aborted(&e) {
+        crate::event!(Debug, "accept_aborted", listener = listener, error = e);
+    } else {
+        crate::event_limited!(Error, "accept_failed", listener = listener, error = e);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn client_aborted(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
+    )
 }
 
 /// Counts a connection that ended and logs it (debug).
@@ -277,5 +287,23 @@ impl Endpoint for TrackerEndpoint {
     }
     fn stop(&self) -> &tokio::sync::Notify {
         &self.closed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn only_client_aborts_are_not_accept_errors() {
+        assert!(super::client_aborted(&Error::from(
+            ErrorKind::ConnectionAborted
+        )));
+        assert!(super::client_aborted(&Error::from(
+            ErrorKind::ConnectionReset
+        )));
+        // EMFILE (24 on Linux and macOS) and others stay errors.
+        assert!(!super::client_aborted(&Error::from_raw_os_error(24)));
+        assert!(!super::client_aborted(&Error::from(ErrorKind::OutOfMemory)));
     }
 }

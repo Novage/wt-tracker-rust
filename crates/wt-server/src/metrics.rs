@@ -28,10 +28,7 @@ pub(crate) async fn accept_loop(me: Rc<Worker>, socket: TcpListener) {
             Ok((stream, peer)) => {
                 spawn_local(serve(me.clone(), stream, peer));
             }
-            Err(e) => {
-                crate::event_limited!(Error, "accept_failed", listener = "metrics", error = e);
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            Err(e) => crate::conn::accept_failed("metrics", e).await,
         }
     }
 }
