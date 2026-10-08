@@ -25,10 +25,10 @@ groups:
         annotations:
           summary: The tracker restarted (deploy, crash or out-of-memory kill).
       - alert: MemoryHigh
-        expr: process_resident_memory_bytes{job="wt-tracker"} > 1.5e9
+        expr: process_resident_memory_bytes{job="wt-tracker"} > 3e9
         for: 5m
         annotations:
-          summary: Tracker memory above 1.5 GB (about 15 KB per peer is normal); adjust to your server.
+          summary: Tracker memory above 3 GB (about 15 KB per peer is normal, 1.5 GB at 100k peers); adjust to your server.
       - alert: FileDescriptorsNearLimit
         expr: process_open_fds{job="wt-tracker"} / process_max_fds{job="wt-tracker"} > 0.8
         for: 5m

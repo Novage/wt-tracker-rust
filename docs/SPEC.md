@@ -1074,7 +1074,7 @@ built on these series only, so a scrape of `/metrics` (job `wt-tracker`) is all 
 Grafana dashboard (data source and `job` variables; rates over `$__rate_interval`, so any scrape
 interval works) and the alert rules (for scrapes every minute or faster) `TrackerDown`
 (`absent_over_time(wt_build_info[5m])`), `WorkerNotAnswering`, `WorkerCpuBusy` (> 0.9 of a core
-over 3 min), `TrackerRestarted`, `MemoryHigh` (> 1.5 GB), `FileDescriptorsNearLimit` (> 80%),
+over 3 min), `TrackerRestarted`, `MemoryHigh` (> 3 GB), `FileDescriptorsNearLimit` (> 80%),
 `ListenOverflows` (> 10 per minute), `EgressPace` (24 h average of
 `wt_socket_bytes_total{direction="out"}` > 3.5 MB/s) and `CertificateExpiring` (< 14 days).
 

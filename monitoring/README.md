@@ -81,7 +81,7 @@ Then import the dashboard into your Grafana as above.
 | WorkerNotAnswering | a worker misses the 1 s scrape deadline for 2 minutes | "CPU per worker": a worker near 100% is stuck |
 | WorkerCpuBusy | a worker thread above 90% of a core over 3 minutes | load (peers) or a stuck worker |
 | TrackerRestarted | the process started within 10 minutes | deploy, crash or out-of-memory kill: the journal |
-| MemoryHigh | resident memory above 1.5 GB for 5 minutes | about 15 KB per peer is normal; adjust to your server |
+| MemoryHigh | resident memory above 3 GB for 5 minutes | about 15 KB per peer is normal (1.5 GB at 100k peers); adjust to your server |
 | FileDescriptorsNearLimit | over 80% of the descriptor limit | raise `LimitNOFILE` |
 | ListenOverflows | the kernel drops more than 10 new connections a minute | a stuck worker, or a CPU-bound server |
 | EgressPace | 24 h average egress above 3.5 MB/s | 10 TB a month (e.g. Oracle Cloud Always Free) is 3.86 MB/s: lower `maxOffers` or raise `announceInterval` |
