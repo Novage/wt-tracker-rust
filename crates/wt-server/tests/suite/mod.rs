@@ -18,6 +18,32 @@ const H: [&str; 8] = [
 ];
 
 #[tokio::test(flavor = "multi_thread")]
+async fn paused_announce_returns_error_and_keeps_connection_open() {
+    let server = plain(2);
+    let mut ws = connect(&server).await;
+    let info_hash = H[0];
+
+    send(
+        &mut ws,
+        &format!(
+            r#"{{"action":"announce","event":"paused","info_hash":"{info_hash}","peer_id":"p0"}}"#
+        ),
+    )
+    .await;
+    assert_eq!(
+        recv(&mut ws).await.unwrap(),
+        format!(
+            r#"{{"action":"announce","failure reason":"unsupported announce event: paused","info_hash":"{info_hash}"}}"#
+        )
+    );
+
+    // A paused announce must not close the socket or create membership. The same connection can
+    // subsequently start announcing normally.
+    send(&mut ws, &announce(info_hash, "p0", 0)).await;
+    assert_eq!(recv(&mut ws).await.unwrap(), reply(info_hash, 0, 1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn offers_and_answers_across_workers_and_shards() {
     let server = hashed(4);
     let mut keep = Vec::new();

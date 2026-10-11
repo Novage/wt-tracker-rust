@@ -68,6 +68,8 @@ impl std::ops::AddAssign for Count {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
     pub announce_replies: Count,
+    /// Explicit announce error responses (currently unsupported `paused` events).
+    pub announce_errors: Count,
     pub offers: Count,
     pub answers: Count,
     pub scrapes: Count,
@@ -78,6 +80,7 @@ pub struct Counters {
 impl std::ops::AddAssign for Counters {
     fn add_assign(&mut self, other: Self) {
         self.announce_replies += other.announce_replies;
+        self.announce_errors += other.announce_errors;
         self.offers += other.offers;
         self.answers += other.answers;
         self.scrapes += other.scrapes;
@@ -88,6 +91,7 @@ impl std::ops::AddAssign for Counters {
 #[derive(Clone, Copy)]
 enum Kind {
     AnnounceReply,
+    AnnounceError,
     Offer,
     Answer,
     Scrape,
@@ -161,6 +165,7 @@ impl Encoder {
         let c = &mut self.counters;
         match kind {
             Kind::AnnounceReply => c.announce_replies.add(bytes),
+            Kind::AnnounceError => c.announce_errors.add(bytes),
             Kind::Offer => c.offers.add(bytes),
             Kind::Answer => c.answers.add(bytes),
             Kind::Scrape => c.scrapes.add(bytes),
@@ -180,6 +185,22 @@ impl Encoder {
             self.scrape = Some(OpenScrape { to, start });
             self.scrape_keys.clear();
         }
+    }
+
+    /// Sends the explicit failure response for an unsupported `paused` announce.
+    /// `info_hash` is already validated as a JSON string token by the parser and can be copied
+    /// verbatim, including hashes too long to be tracker keys.
+    pub(crate) fn paused_announce_error(&mut self, to: ConnId, info_hash: Option<&[u8]>) {
+        let start = self.buf.len();
+        self.buf.extend_from_slice(
+            b"{\"action\":\"announce\",\"failure reason\":\"unsupported announce event: paused\"",
+        );
+        if let Some(info_hash) = info_hash {
+            self.buf.extend_from_slice(b",\"info_hash\":");
+            self.buf.extend_from_slice(info_hash);
+        }
+        self.buf.push(b'}');
+        self.finish(to, start, Kind::AnnounceError);
     }
 }
 

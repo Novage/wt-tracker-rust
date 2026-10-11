@@ -182,11 +182,12 @@ function generateTrace(seed: number, opsCount: number): { seed: number; ops: Op[
       if (info_hash !== undefined) members.push(["info_hash", json(info_hash)]);
       push(int(conns), members, { kind: "scrape", info_hash });
     } else if (kind === "error") {
-      // Rejected by both sides before any state change ("zz" is a fresh peer_id).
+      // Rejected by both sides before any state change ("zz" is a fresh peer_id). The paused
+      // event has a dedicated regression test because the pinned JS reference predates its fix.
       const frame = pick([
         '{"action":"announce","info_hash":"h0","peer_id":"zz"',
         "[]", '"x"', "5", "{}", '{"action":"nope"}', '{"action":5}',
-        '{"action":"announce","event":"paused","info_hash":"h0","peer_id":"zz"}',
+        '{"action":"announce","event":"unsupported","info_hash":"h0","peer_id":"zz"}',
         '{"action":"announce","event":null,"info_hash":"h0","peer_id":"zz"}',
         '{"action":"announce","info_hash":5,"peer_id":"zz"}',
         '{"action":"announce","info_hash":"h0","peer_id":5}',

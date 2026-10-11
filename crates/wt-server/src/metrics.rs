@@ -349,10 +349,22 @@ pub(crate) async fn render(me: &Rc<Worker>) -> String {
         |s, i| received(s, i).bytes,
     );
 
-    const SENT: [&str; 4] = ["announce_reply", "offer", "answer", "scrape"];
+    const SENT: [&str; 5] = [
+        "announce_reply",
+        "announce_error",
+        "offer",
+        "answer",
+        "scrape",
+    ];
     let sent = |s: &ShardStats, i: usize| {
         let c = &s.sent;
-        [c.announce_replies, c.offers, c.answers, c.scrapes][i]
+        [
+            c.announce_replies,
+            c.announce_errors,
+            c.offers,
+            c.answers,
+            c.scrapes,
+        ][i]
     };
     t.per_worker_label(
         "wt_sent_messages_total",

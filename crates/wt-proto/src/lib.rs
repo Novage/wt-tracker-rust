@@ -48,7 +48,7 @@ pub enum ProtoError {
     NotAnObject,
     /// `action` missing, not a string, or not `announce` / `scrape`.
     UnknownAction,
-    /// `event` present but not `started`, `completed` or `stopped`.
+    /// An event other than `started`, `completed`, `stopped`, or the explicitly handled `paused`.
     UnknownEvent,
     /// A field has the wrong type or an unsupported form.
     BadField(&'static str),
@@ -164,6 +164,9 @@ pub fn apply(
         )?,
         // An id that cannot match anything: nothing to stop (same as JS).
         Message::Stop { .. } => {}
+        Message::Paused { info_hash } => {
+            out.paused_announce_error(conn, *info_hash);
+        }
         Message::Scrape { info_hashes } => {
             let slices: SmallVec<[&[u8]; 4]>;
             let target = match info_hashes {

@@ -92,6 +92,9 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
+- Handle unsupported WebTorrent `event: "paused"` announces with an explicit announce failure
+  response, optionally correlated by the original string `info_hash`, without changing swarm
+  membership or closing the WebSocket.
 - A worker could hang at 100% CPU, stalling its connections until an out-of-memory kill: a
   client whose first TLS record was larger than 8 KiB and arrived in parts left the HTTP head
   reader looping on a readable socket it did not read, without ever yielding. Production

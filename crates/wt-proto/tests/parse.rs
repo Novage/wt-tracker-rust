@@ -72,12 +72,53 @@ fn event_values() {
         &format!(r#"{{{A},"event":"st~u0061rted"}}"#),
         |b, e, _, _| assert_eq!(e, AnnounceEvent::Started, "{b}"),
     );
-    for bad in [r#""paused""#, "null", "5", "{}"] {
+    for bad in ["null", "5", "{}"] {
         err(
             &format!(r#"{{{A},"event":{bad}}}"#),
             ProtoError::UnknownEvent,
         );
     }
+}
+
+#[test]
+fn paused_announces_are_parsed_for_an_error_response() {
+    each(
+        r#"{"action":"announce","event":"paused","info_hash":"h1","peer_id":5}"#,
+        |b, r| match r {
+            Ok(Message::Paused {
+                info_hash: Some(raw),
+            }) => assert_eq!(raw, br#""h1""#.as_slice(), "{b}"),
+            other => panic!("{b}: {other:?}"),
+        },
+    );
+
+    // Escaped spellings of the event are equivalent, as with JSON.parse.
+    each(
+        r#"{"action":"announce","event":"pa~u0075sed","info_hash":"h1"}"#,
+        |b, r| match r {
+            Ok(Message::Paused {
+                info_hash: Some(raw),
+            }) => assert_eq!(raw, br#""h1""#, "{b}"),
+            other => panic!("{b}: {other:?}"),
+        },
+    );
+
+    // The event is rejected regardless of peer_id validity; only a string info_hash is echoed.
+    each(
+        r#"{"action":"announce","event":"paused","info_hash":5}"#,
+        |b, r| {
+            assert!(
+                matches!(r, Ok(Message::Paused { info_hash: None })),
+                "{b}: {r:?}"
+            )
+        },
+    );
+    each(r#"{"action":"announce","event":"paused"}"#, |b, r| {
+        assert!(
+            matches!(r, Ok(Message::Paused { info_hash: None })),
+            "{b}: {r:?}"
+        )
+    });
 }
 
 #[test]

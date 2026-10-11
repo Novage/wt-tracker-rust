@@ -52,6 +52,9 @@ enum Kind {
     Scrape {
         info_hashes: Option<SmallVec<[Vec<u8>; 4]>>,
     },
+    Paused {
+        info_hash: Option<Span>,
+    },
 }
 
 /// A [`Message`] that owns its frame. Built with [`OwnedMessage::new`], read back with
@@ -139,6 +142,9 @@ impl OwnedMessage {
                     .as_ref()
                     .map(|hashes| hashes.iter().map(|h| h.to_vec()).collect()),
             },
+            Message::Paused { info_hash } => Kind::Paused {
+                info_hash: info_hash.map(span),
+            },
         };
         Self { frame, kind }
     }
@@ -195,6 +201,9 @@ impl OwnedMessage {
                 info_hashes: info_hashes
                     .as_ref()
                     .map(|hashes| hashes.iter().map(|h| Cow::Borrowed(h.as_slice())).collect()),
+            },
+            Kind::Paused { info_hash } => Message::Paused {
+                info_hash: info_hash.map(slice),
             },
         }
     }

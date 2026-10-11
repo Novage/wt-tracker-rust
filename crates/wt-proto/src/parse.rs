@@ -49,16 +49,20 @@ pub enum Message<'a> {
         /// `None`: all swarms. Otherwise the requested hashes in order (may be empty).
         info_hashes: Option<SmallVec<[Cow<'a, [u8]>; 4]>>,
     },
+    /// An unsupported paused announce. `info_hash` is the raw JSON string token, if provided
+    /// as a string; it is echoed in the error response without imposing the key length limit.
+    Paused { info_hash: Option<&'a [u8]> },
 }
 
 impl Message<'_> {
     /// The `info_hash` that decides which shard owns the message. `None` for scrapes (they
-    /// may span shards), and for stops and answers that cannot match.
+    /// may span shards), unmatchable stops/answers, and paused announces (which are rejected
+    /// without changing tracker state).
     pub fn route_info_hash(&self) -> Option<Key> {
         match self {
             Message::Announce { info_hash, .. } => Some(*info_hash),
             Message::Answer { info_hash, .. } | Message::Stop { info_hash, .. } => *info_hash,
-            Message::Scrape { .. } => None,
+            Message::Scrape { .. } | Message::Paused { .. } => None,
         }
     }
 }
@@ -495,6 +499,16 @@ fn interpret<'a>(frame: &'a [u8], f: Fields<'a>) -> Result<Message<'a>, ProtoErr
     }
     if !string_equals(action, "announce") {
         return Err(ProtoError::UnknownAction);
+    }
+
+    // A paused announce gets an explicit error response, not a protocol error. It must not
+    // validate peer_id or mutate swarm state, and an info_hash is echoed only if it is a string.
+    if f.event
+        .is_some_and(|e| is_string(e) && string_equals(e, "paused"))
+    {
+        return Ok(Message::Paused {
+            info_hash: f.info_hash.filter(|raw| is_string(raw)),
+        });
     }
 
     let event = match f.event {

@@ -480,9 +480,16 @@ impl Worker {
         };
         let first = {
             let mut conns = self.conns.borrow_mut();
-            conns
-                .get_mut(conn_slot(conn))
-                .is_some_and(|entry| !std::mem::replace(&mut entry.placed, true))
+            conns.get_mut(conn_slot(conn)).is_some_and(|entry| {
+                let first = !entry.placed;
+                // A paused announce is rejected without creating membership. Don't consume the
+                // first-announce placement opportunity; the next real announce may move the
+                // connection to its content shard.
+                if !matches!(message, Message::Paused { .. }) {
+                    entry.placed = true;
+                }
+                first
+            })
         };
         let routed = self
             .route_message(conn, frame, &message, first)
@@ -498,7 +505,7 @@ impl Worker {
         }
         self.count_received(|r| {
             let kind = match &message {
-                Message::Announce { .. } => &mut r.announces,
+                Message::Announce { .. } | Message::Paused { .. } => &mut r.announces,
                 Message::Answer { .. } => &mut r.answers,
                 Message::Stop { .. } => &mut r.stops,
                 Message::Scrape { .. } => &mut r.scrapes,

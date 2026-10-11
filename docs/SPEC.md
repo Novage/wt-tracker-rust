@@ -216,7 +216,8 @@ expiry, and a connection change. It corresponds to JS `onRemovePeer`.
 WebSocket text frame, applies it to the shard and appends the outgoing messages to the encoder
 (`handle_with::<B>` picks the parser backend, §7.4). **Every `Err` means: close the connection
 and call `Shard::disconnect(conn)`**, as the JS server does (`ws.close()` → `onClose` →
-`disconnect`). A rejected frame changes no state.
+`disconnect`). The `paused` announce event is deliberately handled without an error: it emits
+an explicit failure response, leaves tracker state unchanged, and keeps the connection open.
 
 ### 7.1 Incoming frames
 
@@ -228,7 +229,9 @@ ignored but still validated (answers forward them).
 | Field / case | Rule (same as the JS tracker) | Result |
 |---|---|---|
 | `action` | `"scrape"` → scrape; `"announce"` → by `event`; missing, not a string, or another value | `UnknownAction` |
-| `event` | absent → none; `"started"`, `"completed"`; `"stopped"` → stop; any other value, including `null` | `UnknownEvent` |
+| `event` | absent → none; `"started"`, `"completed"`; `"stopped"` → stop | according to event |
+| announce event `"paused"` | Return the unsupported-event response in §7.2 without validating `peer_id` or changing tracker state; echo `info_hash` only when it is a JSON string | `Paused` (not an error) |
+| other event values | Any other value, including `null` | `UnknownEvent` |
 | answer | `event` absent and `answer` present with **any** value (even `null`) | answer |
 | announce `info_hash`, `peer_id` | must be strings (`BadField`); decoded > 40 bytes → `KeyTooLong`; lone surrogate → `BadField` | `Announce` |
 | `numwant` | a number with an integral value (`Number.isInteger`: `10`, `10.0`, `1e1`, `1e300`) → `Some(clamp(n, 0, u32::MAX))` (negative → 0 offers); anything else (`2.5`, `"10"`, `null`, absent) → `None` | |
@@ -252,6 +255,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | offer | `{"action":"announce","info_hash":S,"offer_id":RAW,"peer_id":S,"offer":{"type":"offer","sdp":RAW}}`; `offer_id` / `sdp` omitted when absent; other offer fields dropped |
 | answer | `head` + `tail`: the received answer without `to_peer_id`, all other members in order |
 | scrape | `{"action":"scrape","files":{S:{"complete":N,"incomplete":N,"downloaded":N},…}}`; a repeated hash keeps its first entry; order for "all swarms" is unspecified |
+| unsupported paused announce | `{"action":"announce","failure reason":"unsupported announce event: paused","info_hash":S}`; the `info_hash` member is omitted unless the request supplied a JSON string, whose original token is echoed |
 
 - `S` (ids, hashes) is written like `JSON.stringify`: `"` and `\` escaped, `\b \t \n \f \r`, other
   characters below 0x20 as `\u00xx` (lowercase), everything else raw UTF-8.
@@ -265,7 +269,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 |---|---|
 | `InvalidJson` | not UTF-8, not JSON, or data after the object |
 | `NotAnObject` | valid JSON whose top level is not an object (including `null`) |
-| `UnknownAction` / `UnknownEvent` | §7.1 |
+| `UnknownAction` / `UnknownEvent` | §7.1; `UnknownEvent` excludes the explicitly handled `"paused"` event |
 | `BadField(name)` | a field with the wrong type or an unsupported form (§7.1) |
 | `KeyTooLong` | announce `info_hash` / `peer_id` or answer `to_peer_id` > 40 bytes |
 | `Tracker(TrackerError)` | rejected by the core (§5.8); unreachable from frames (keys are checked when parsing) |
@@ -280,15 +284,15 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 - Ids are unescaped directly into the inline `Key`; offers are kept in `SmallVec<[Payload; 20]>`;
   only scrape hashes with escapes allocate (`Cow`).
 - `handle_with::<B>` = `B::parse` + `apply(shard, now, conn, &Message, out)`. `Message::route_info_hash()`
-  gives the `info_hash` that picks the shard (`None` for scrapes, unmatchable stops, answers
-  without a usable string `info_hash`).
+  gives the `info_hash` that picks the shard (`None` for scrapes, unmatchable stops/answers,
+  and paused announces which do not mutate the tracker state).
 - `OwnedMessage::new(frame: Bytes, &message)` makes a parsed message `Send` without copying (the
   frame plus offsets); `.message()` gives it back.
 - `Encoder`: one byte buffer plus a message index. `messages()` yields `(ConnId, &[u8])` in emission
   order, `removed()` the `peer_removed` events, `bytes()` the total size; `clear()` keeps capacity;
   `take()` moves all messages out as a `Batch` (one `Bytes` buffer, each message a slice of it).
   Integers via `itoa`. `counters()`: messages and JSON bytes produced since the encoder was
-  created, per kind (`announce_replies`, `offers`, `answers`, `scrapes`; `Count { messages,
+  created, per kind (`announce_replies`, `announce_errors`, `offers`, `answers`, `scrapes`; `Count { messages,
   bytes }`), not reset by `clear()` / `take()`.
 
 ## 8. Differences from the JS `FastTracker`
@@ -296,6 +300,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | Topic | JS | Rust | Why |
 |---|---|---|---|
 | Partial offer fan-out | random window | `RandomSample` by default; window and round-robin available | no clustering of receivers; costs about 30 ns per announce |
+| Paused announce | Proposed JS change: explicit failure response, no close or state change | Explicit failure response, no close or state change | Handled separately from fatal protocol errors; CI differential reference is pinned to an older JS revision |
 | Key length | any string | ≤ 40 bytes, else `KeyTooLong` | inline keys, no allocation |
 | Time | `performance.now()` ms, internal `setInterval` sweep | caller passes `now` seconds and calls `expire` | sans-IO, deterministic |
 | Malformed `offers` | error only when an offer is actually sent (swarm > 1, integer `numwant`), after the reply and possibly some offers went out | `BadField("offers")` before anything happens, whenever offers are malformed | all-or-nothing; affects only malformed clients |
@@ -1052,7 +1057,7 @@ the hot path) and gathered as in §13.4. Families:
 | `wt_worker_busy_ratio` | gauge | worker | runtime busy share, moving average (`content`, > 1 worker) |
 | `wt_listener_connections` | gauge | `listener` | open WebSockets per listener (`host:port`) |
 | `wt_received_messages_total`, `wt_received_bytes_total` | counter | worker, `kind` | `announce`, `answer`, `stop`, `scrape`, `invalid` (not parsed); JSON bytes after inflating, counted once by the handling worker |
-| `wt_sent_messages_total`, `wt_sent_bytes_total` | counter | worker, `kind` | `announce_reply`, `offer`, `answer`, `scrape`; JSON bytes before framing and compression, counted by the producing shard |
+| `wt_sent_messages_total`, `wt_sent_bytes_total` | counter | worker, `kind` | `announce_reply`, `announce_error` (unsupported `paused` response), `offer`, `answer`, `scrape`; JSON bytes before framing and compression, counted by the producing shard |
 | `wt_rejected_messages_total` | counter | worker, `reason` | `invalid_json`, `not_an_object`, `unknown_action`, `unknown_event`, `bad_field`, `key_too_long` (from `ProtoError` / `TrackerError`; counted by the rejecting worker) |
 | `wt_dropped_answers_total` | counter | worker | answers not delivered (§5.3), counted by the shard that dropped them |
 | `wt_closed_connections_total` | counter | worker, `reason` | WebSocket: `client_close` (close frame from the client), `idle_timeout`, `protocol_error` (1002), `too_big` (1009), `invalid_data` (1007), `rejected` (1008), `server_close` (1000 from the server), `shutdown` (1001), `eof`, `socket_error`; before the upgrade: `tls_handshake` (failed or > 10 s), `bad_request` (no valid head within 10 s), `max_connections`, `origin_denied`, `bad_upgrade` (e.g. no `Sec-WebSocket-Key`). Counted by the worker holding the connection when it ends; HTTP requests are in `wt_http_requests_total` |

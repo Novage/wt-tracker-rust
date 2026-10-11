@@ -259,6 +259,40 @@ fn scrape_files() {
 }
 
 #[test]
+fn paused_announce_returns_correlated_error_without_state_change() {
+    check(
+        &[(
+            1,
+            r#"{"action":"announce","event":"paused","info_hash":"h1","peer_id":"p1"}"#,
+        )],
+        &[(
+            1,
+            r#"{"action":"announce","failure reason":"unsupported announce event: paused","info_hash":"h1"}"#,
+        )],
+    );
+
+    // No membership is created, and a non-string hash is not copied into the response.
+    check(
+        &[
+            (
+                1,
+                r#"{"action":"announce","event":"paused","info_hash":5,"peer_id":5}"#,
+            ),
+            (9, r#"{"action":"scrape"}"#),
+        ],
+        &[(9, r#"{"action":"scrape","files":{}}"#)],
+    );
+
+    check(
+        &[(1, r#"{"action":"announce","event":"paused","info_hash":5}"#)],
+        &[(
+            1,
+            r#"{"action":"announce","failure reason":"unsupported announce event: paused"}"#,
+        )],
+    );
+}
+
+#[test]
 fn stop_with_unmatchable_ids_is_a_no_op() {
     check(
         &[
@@ -300,17 +334,26 @@ fn counters_count_messages_and_bytes_per_kind_across_clears() {
             3,
             r#"{"action":"scrape","info_hash":"h0000000000000000001"}"#,
         ),
+        (
+            4,
+            r#"{"action":"announce","event":"paused","info_hash":"h0000000000000000001","peer_id":"pc"}"#,
+        ),
     ];
-    let mut bytes = [0u64; 4];
+    let mut bytes = [0u64; 5];
     for (i, (conn, frame)) in frames.iter().enumerate() {
         out.clear();
         wt_proto::handle(&mut shard, 0, ConnId(*conn), frame.as_bytes(), &mut out).unwrap();
         // Frame 2 produces a reply and an offer; the others one message each.
         for (_, text) in out.messages() {
-            let kind = match (i, text.windows(7).any(|w| w == b"\"offer\"")) {
-                (1, true) => 1,
-                (2, _) => 2,
-                (3, _) => 3,
+            let is_offer = text.windows(7).any(|w| w == b"\"offer\"");
+            let is_error = text
+                .windows(b"failure reason".len())
+                .any(|w| w == b"failure reason");
+            let kind = match (i, is_offer, is_error) {
+                (_, _, true) => 4,
+                (1, true, false) => 1,
+                (2, _, false) => 2,
+                (3, _, false) => 3,
                 _ => 0,
             };
             bytes[kind] += text.len() as u64;
@@ -322,16 +365,18 @@ fn counters_count_messages_and_bytes_per_kind_across_clears() {
             c.announce_replies.messages,
             c.offers.messages,
             c.answers.messages,
-            c.scrapes.messages
+            c.scrapes.messages,
+            c.announce_errors.messages
         ],
-        [2, 1, 1, 1]
+        [2, 1, 1, 1, 1]
     );
     assert_eq!(
         [
             c.announce_replies.bytes,
             c.offers.bytes,
             c.answers.bytes,
-            c.scrapes.bytes
+            c.scrapes.bytes,
+            c.announce_errors.bytes
         ],
         bytes
     );
