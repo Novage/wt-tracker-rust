@@ -1,3 +1,5 @@
+[![Build Status](https://github.com/Novage/wt-tracker-rust/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Novage/wt-tracker-rust/actions/workflows/ci.yml?query=branch%3Amain)
+
 # wt-tracker-rust
 
 A multi-core [WebTorrent](https://webtorrent.io/) tracker in Rust: a port of
