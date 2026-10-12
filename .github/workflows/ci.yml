@@ -1,7 +1,7 @@
 # The finish checklist of AGENTS.md on every pull request and every push to main, a short fuzzing
 # run of every fuzz target, plus the Autobahn conformance suite on pushes to main. Nightly
 # (03:00 UTC): everything again, with 20 minutes of fuzzing per target.
-name: CI
+name: Build & Test
 
 on:
   pull_request:
