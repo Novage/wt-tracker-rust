@@ -228,7 +228,7 @@ ignored but still validated (answers forward them).
 | Field / case | Rule (same as the JS tracker) | Result |
 |---|---|---|
 | `action` | `"scrape"` → scrape; `"announce"` → by `event`; missing, not a string, or another value | `UnknownAction` |
-| `event` | absent → none; `"started"`, `"completed"`; `"stopped"` → stop; any other value, including `null` | `UnknownEvent` |
+| `event` | absent or `"paused"` → none (a periodic announce; `"paused"`: BEP 21 partial seed, sent by libtorrent and Transmission on every announce, handled like the reference tracker: the peer is added if unknown, stays incomplete, its offers go out; with an `answer` it is an answer); `"started"`, `"completed"`; `"stopped"` → stop; any other value, including `"update"` and `null` | `UnknownEvent` |
 | answer | `event` absent and `answer` present with **any** value (even `null`) | answer |
 | announce `info_hash`, `peer_id` | must be strings (`BadField`); decoded > 40 bytes → `KeyTooLong`; lone surrogate → `BadField` | `Announce` |
 | `numwant` | a number with an integral value (`Number.isInteger`: `10`, `10.0`, `1e1`, `1e300`) → `Some(clamp(n, 0, u32::MAX))` (negative → 0 offers); anything else (`2.5`, `"10"`, `null`, absent) → `None` | |
@@ -319,6 +319,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | Message rejected on another worker | (single tracker) | close 1008, like a local rejection | |
 | Slow receivers | uWS buffers up to its backpressure limit | messages beyond `maxBackpressure` (1 MiB) per connection are dropped | bounded memory |
 | Peer identity | global per tracker (per worker in multi-worker) | per shard | sharding |
+| `"event":"paused"` (BEP 21 partial seed) | unknown event: close | a periodic announce (§7.1), like the reference `bittorrent-tracker` | libtorrent (also over WebSocket) and Transmission send it on every announce while a partial seed; a close removed the peer and its pieces from the swarm |
 | Stop from another connection | removes the peer | no-op (§5.4) | hardening: peer_ids are public (offers carry them), so any client could remove other viewers |
 | SIGTERM / SIGINT | process exits at once, connections dropped | graceful shutdown: close 1001, up to `shutdownTimeout` (§13.6) | deployments (docker stop, systemd) |
 | Answer outside the rules of §5.3 (target or sender not in the answer's swarm, a sender of another connection, unknown target) | delivered to any known `to_peer_id`; unknown target → `TrackerError` → close | dropped, connection kept, `wt_dropped_answers_total` | hardening: no forged senders or answers into other swarms; dropping, not closing, because an answer can race a disconnect or a quality switch |
@@ -391,7 +392,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   CRLF, quotes, backslashes, U+2028, emoji, control characters, absent; array `offer`; extra
   members), answers (`answer` object / `null` / number, extra members, any member order,
   unknown targets, without `info_hash`, ~10% from another connection than the sender's), stops, scrapes (all / one / array with non-strings / number), error frames
-  that both sides reject without a state change, disconnects, clock advances and expiry, with
+  that both sides reject without a state change (an unknown event is `"update"`; `"paused"` is a
+  §8 difference and not generated), disconnects, clock advances and expiry, with
   shuffled member order and ~6% non-canonical frames (whitespace, escaped spellings, duplicate
   members). JS runs each frame like `uws-tracker` (`JSON.parse` → `FastTracker` with fake clock,
   captured sweep and seeded `Math.random` → `JSON.stringify`; a `SyntaxError` / `TrackerError`
@@ -507,7 +509,10 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   used by `monitoring/grafana-dashboard.json` and `monitoring/alerts.yaml` (the Linux-only
   series checked on Linux). `tests/suite`: the exact
   `/stats.json` keys, `?infoHash=` (unknown swarm, malformed → 400), `/metrics` only on its own
-  listener, `wt_http_requests_total`. Unit tests: logfmt quoting, RFC 3339 timestamps, the rate
+  listener, `wt_http_requests_total`; a partial seed announcing `"paused"` from its first
+  announce on is added as incomplete, its offer is delivered and its connection stays open
+  (`wt-proto/tests/parse.rs`: `"paused"` → no event; `"update"`, `"pause"`, `"Paused"` stay
+  `UnknownEvent`). Unit tests: logfmt quoting, RFC 3339 timestamps, the rate
   limit, label uniqueness, metric text escaping, info_hash hex and query parsing; `auth.rs`
   (right credentials in any scheme case pass; a wrong user or password, no `:`, empty, another
   scheme, bad base64 or no header fail); `config.rs` (the metrics pairs, empty and `:` values,

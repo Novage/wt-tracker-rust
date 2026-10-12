@@ -56,6 +56,32 @@ async fn offers_and_answers_across_workers_and_shards() {
     assert_eq!(first["workers"].as_array().unwrap().len(), 1, "{first}");
 }
 
+/// BEP 21 partial seed (spec §7.1): `"event":"paused"` on every announce, also the first one, is
+/// a periodic announce: the unknown peer is added as incomplete, its offers are forwarded, the
+/// connection stays open.
+#[tokio::test(flavor = "multi_thread")]
+async fn paused_announce_is_a_periodic_announce() {
+    let server = plain(2);
+    let mut seed = connect(&server).await;
+    send(&mut seed, &announce(H[0], "seed", 0)).await;
+    assert_eq!(recv(&mut seed).await.unwrap(), reply(H[0], 0, 1));
+
+    let paused = |offers| {
+        announce(H[0], "partial", offers).replace(
+            r#""action":"announce","#,
+            r#""action":"announce","event":"paused","left":1024,"#,
+        )
+    };
+    let mut partial = connect(&server).await;
+    send(&mut partial, &paused(1)).await;
+    assert_eq!(recv(&mut partial).await.unwrap(), reply(H[0], 0, 2));
+    assert_eq!(recv(&mut seed).await.unwrap(), offer(H[0], "partial", 0));
+    // Every later announce is paused too; the connection stays open.
+    send(&mut partial, &paused(0)).await;
+    assert_eq!(recv(&mut partial).await.unwrap(), reply(H[0], 0, 2));
+    assert_eq!(swarm(&server, H[0]).await["peers"], 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn scrape_merges_shards_in_request_order() {
     let server = hashed(4);

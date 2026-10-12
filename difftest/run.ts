@@ -186,7 +186,8 @@ function generateTrace(seed: number, opsCount: number): { seed: number; ops: Op[
       const frame = pick([
         '{"action":"announce","info_hash":"h0","peer_id":"zz"',
         "[]", '"x"', "5", "{}", '{"action":"nope"}', '{"action":5}',
-        '{"action":"announce","event":"paused","info_hash":"h0","peer_id":"zz"}',
+        // Not "paused": a periodic announce in Rust, an error in JS (spec §8).
+        '{"action":"announce","event":"update","info_hash":"h0","peer_id":"zz"}',
         '{"action":"announce","event":null,"info_hash":"h0","peer_id":"zz"}',
         '{"action":"announce","info_hash":5,"peer_id":"zz"}',
         '{"action":"announce","info_hash":"h0","peer_id":5}',

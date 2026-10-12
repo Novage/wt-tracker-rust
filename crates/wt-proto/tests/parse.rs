@@ -72,7 +72,18 @@ fn event_values() {
         &format!(r#"{{{A},"event":"st~u0061rted"}}"#),
         |b, e, _, _| assert_eq!(e, AnnounceEvent::Started, "{b}"),
     );
-    for bad in [r#""paused""#, "null", "5", "{}"] {
+    // BEP 21 partial seed: a periodic announce.
+    announce(&format!(r#"{{{A},"event":"paused"}}"#), |b, e, _, _| {
+        assert_eq!(e, AnnounceEvent::None, "{b}")
+    });
+    for bad in [
+        r#""update""#,
+        r#""pause""#,
+        r#""Paused""#,
+        "null",
+        "5",
+        "{}",
+    ] {
         err(
             &format!(r#"{{{A},"event":{bad}}}"#),
             ProtoError::UnknownEvent,

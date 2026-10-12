@@ -71,6 +71,10 @@ All notable changes to this project are listed here. The format follows
 
 ### Changed
 
+- `"event":"paused"` (BEP 21 partial seed, sent by libtorrent and Transmission on every announce
+  while a partial seed) is a periodic announce, as in the reference `bittorrent-tracker`; it
+  closed the connection as an unknown event before.
+
 - **Hardening (differs from the JS tracker):** a `stop` is applied only from the connection
   that owns the peer (peer_ids are public: any client could remove other viewers). An answer is
   delivered only if its sender is a peer of the sending connection and both sender and target
