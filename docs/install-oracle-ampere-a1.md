@@ -3,7 +3,7 @@
 This guide sets up wt-tracker-rust as a public `wss://` WebTorrent tracker on an Oracle Cloud
 **Always Free** Ampere A1 instance (2 OCPU, 12 GB, aarch64), with a Let's Encrypt certificate
 from certbot that renews without restarting the tracker. The same setup runs
-`wss://tracker.novage.com.ua` (47k peers at the daily peak, about 0.4 of one core and 690 MiB).
+`wss://tracker.novage.com.ua`.
 
 Replace `tracker.example.com` and `admin@example.com` with your domain and email.
 
@@ -158,7 +158,7 @@ sudo tee /etc/wt-tracker-rust/config.json > /dev/null <<'EOF'
       }
     }
   ],
-  "tracker": { "maxOffers": 10, "announceInterval": 180 },
+  "tracker": { "maxOffers": 5, "announceInterval": 180 },
   "workers": 2,
   "reusePort": true,
   "shutdownTimeout": 5,
@@ -167,9 +167,11 @@ sudo tee /etc/wt-tracker-rust/config.json > /dev/null <<'EOF'
 EOF
 ```
 
-- `compressOutgoingMinSize: 256`, `maxOffers: 10`, `announceInterval: 180`: less outbound traffic
-  per peer. The Always Free tier includes **10 TB of egress per month** (about 3.86 MB/s on
-  average), which is the real limit: about 100k peers at ~38 B/s each.
+- `compressOutgoingMinSize: 256`, `maxOffers: 5`, `announceInterval: 180`: less outbound traffic
+  per peer. `maxOffers: 5` is the limit the official WebTorrent client uses; it caps the offers
+  that grow with the swarm size in big live events. The Always Free tier includes **10 TB of
+  egress per month** (about 3.86 MB/s on average), which is the real limit: about 120k peers on
+  average at ~31 B/s each.
 - `metrics`: Prometheus `/metrics` and `/swarms` on localhost only. Remove it if not needed.
 - Every setting: [README](../README.md#configuration) and [spec §13.1](SPEC.md#131-configuration-js-format).
 

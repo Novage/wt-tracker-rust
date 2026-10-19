@@ -23,8 +23,8 @@ A multi-core [WebTorrent](https://webtorrent.io/) tracker in Rust: a port of
   for the JS tracker.
 
 **Status:** in production since October 2026 at `wss://tracker.novage.com.ua` (Oracle Cloud
-Ampere A1, 2 cores, Always Free), with up to 51k concurrent peers so far. Development continues;
-open items are listed in [§12 of the specification](docs/SPEC.md#12-open-items).
+Ampere A1, 2 cores, Always Free). Development continues; open items are listed in
+[§12 of the specification](docs/SPEC.md#12-open-items).
 
 ## Performance
 
@@ -43,8 +43,8 @@ announce, every offer answered (`loadtest/run.sh`; full table in
 **In production** at `wss://tracker.novage.com.ua` (Oracle Ampere A1, 2 cores, real
 p2p-media-loader peers, ~42k connections): 0.35 cores and 590 MiB, against 1.46 cores and 1.9 GiB
 for aquatic_ws on the same host and load; compressing outgoing offers cut egress by ~25% at no
-measurable CPU cost ([spec §12](docs/SPEC.md#12-open-items)). The free server handles about 100k
-peers within its free 10 TB of monthly egress and about 200k with its 2 cores (estimated).
+measurable CPU cost ([spec §12](docs/SPEC.md#12-open-items)). The free server handles about 120k
+peers on average within its free 10 TB of monthly egress and more than 200k with its 2 cores.
 
 Against [aquatic_ws](https://github.com/greatest-ape/aquatic) (Rust, io_uring) in a Linux
 container, for the same traffic, this server uses 1.8–5.4× less CPU and 4–14 KiB per connection
