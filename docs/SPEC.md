@@ -450,7 +450,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   cases 12.* / 13.*; the echo server negotiates compression and compresses every reply): no case
   may be FAILED. The cases run per server in groups (1–7, 9–10, 12, 13); a group whose run lost a
   connection through Docker Desktop's `host.docker.internal` (wstest then skips the rest of the
-  run) is run again, up to 3 attempts. Reports in `target/autobahn/reports-<server>-<group>`,
+  run), or whose container ended with an error (its status and log tail are printed), is run
+  again, up to 3 attempts. Reports in `target/autobahn/reports-<server>-<group>`,
   merged into `target/autobahn/merged.json`. Last result (M1, 2026-10-02):
   517 cases each over ws and wss — 503 OK, 11 NON-STRICT (3.2, 3.3, 4.1.3, 4.1.4, 4.2.3, 4.2.4,
   5.15, 6.4.1–6.4.4: invalid UTF-8 detected when a fragmented message completes, not at the
@@ -475,7 +476,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   socket bytes (a connection moved at its first message is counted once).
   `wt-proto/tests/encode.rs`: `Encoder::counters` per kind, kept across `clear` / `take`.
 - `tests/shutdown.rs`: a graceful shutdown closes every connection with 1001 and returns once
-  they are closed, then connects are refused; a zero timeout returns at once with a client that
+  they are closed, then nothing accepts on its port (a connect fails, or is a TCP self-connect:
+  the freed port can become the client's own source port); a zero timeout returns at once with a client that
   never answers; the `wt-tracker` binary (Unix) closes with 1001, logs `event=stopped` and exits
   0 on SIGTERM (its address is read from the `event=listening` log line); on SIGHUP it logs
   `tls_reloaded` (with the new `not_after`) after the certificate files changed, its wss:// listener

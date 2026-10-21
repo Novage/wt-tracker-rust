@@ -47,7 +47,20 @@ async fn graceful_shutdown_closes_every_connection_with_going_away() {
         "{:?}",
         started.elapsed()
     );
-    assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+    assert_listener_closed(addr).await;
+}
+
+/// Nothing accepts on `addr` any more. The port is free after the shutdown, so a connect can
+/// still succeed without a server: the kernel may give the client socket that same port as its
+/// source port (a TCP self-connect). That counts as closed.
+async fn assert_listener_closed(addr: std::net::SocketAddr) {
+    if let Ok(tcp) = tokio::net::TcpStream::connect(addr).await {
+        assert_eq!(
+            tcp.local_addr().unwrap(),
+            tcp.peer_addr().unwrap(),
+            "something still accepts on {addr}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

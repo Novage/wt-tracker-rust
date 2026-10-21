@@ -4,7 +4,8 @@
 # ws:// and wss://, including the permessage-deflate cases (12.*, 13.*; the echo server
 # compresses every reply). Long runs through Docker Desktop's host.docker.internal sometimes
 # drop a connect, after which wstest skips the rest of that run, so the cases run in groups,
-# one server at a time, and a group whose run hit that is run again (up to 3 attempts). Reports:
+# one server at a time, and a group whose run hit that, or whose container ended with an error, is
+# run again (up to 3 attempts). Reports:
 # target/autobahn/reports-<server>-<group>/index.html, merged into target/autobahn/merged.json.
 # Exits non-zero if any case FAILED or a group did not complete.
 set -euo pipefail
@@ -45,12 +46,21 @@ for server in "${SERVERS[@]}"; do
 EOF
       rm -rf "$OUT/reports-$name"
       # --add-host: host.docker.internal on Linux too (Docker Desktop defines it already).
+      status=0
       docker run --rm --platform "$PLATFORM" --add-host=host.docker.internal:host-gateway \
         -v "$PWD/$OUT:/out" "$IMAGE" \
         wstest -m fuzzingclient -s "/out/fuzzingclient-$name.json" > "$OUT/wstest-$name.log" 2>&1 \
-        || { tail -20 "$OUT/wstest-$name.log"; exit 1; }
-      grep -q "failed (User timeout" "$OUT/wstest-$name.log" || break
-      echo "$agent group $g, attempt $attempt: a connection timed out; running the group again" >&2
+        || status=$?
+      if [ "$status" -ne 0 ]; then
+        # The container sometimes ends with an error and an empty log before any case ran (seen
+        # in CI): report it and run the group again.
+        echo "$agent group $g, attempt $attempt: docker / wstest exited with status $status" >&2
+        tail -20 "$OUT/wstest-$name.log" >&2
+      elif ! grep -q "failed (User timeout" "$OUT/wstest-$name.log"; then
+        break
+      else
+        echo "$agent group $g, attempt $attempt: a connection timed out; running the group again" >&2
+      fi
       [ "$attempt" = "$ATTEMPTS" ] && incomplete="$incomplete $name"
     done
   done
