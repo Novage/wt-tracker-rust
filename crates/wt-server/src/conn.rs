@@ -24,9 +24,11 @@ use crate::ws::driver::{self, Endpoint, Flow, Io, Limits, Parked};
 
 /// TLS handshake + HTTP request head must complete within this time.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Longer `Origin` values are kept as [`TOO_LONG_ORIGIN`] (spec §13.7).
-const MAX_ORIGIN: usize = 255;
-const TOO_LONG_ORIGIN: &str = "(too long)";
+/// `Origin` values up to this length are kept as sent (spec §13.7): every valid origin fits
+/// (`https://` + a 253-byte host + `:65535` is 267 bytes, other schemes a little more).
+const MAX_ORIGIN: usize = 512;
+/// A longer value keeps this many bytes (cut at a character boundary) and a marker.
+const LONG_ORIGIN_PREFIX: usize = 64;
 
 pub(crate) async fn accept_loop(me: Rc<Worker>, listener: usize, socket: TcpListener) {
     loop {
@@ -258,12 +260,16 @@ struct TrackerEndpoint {
     moving: RefCell<Option<(usize, Bytes)>>,
 }
 
-/// The origin a connection is counted under: `""` without an `Origin` header.
+/// The origin a connection is counted under: `""` without an `Origin` header; a value over
+/// [`MAX_ORIGIN`] bytes as its first [`LONG_ORIGIN_PREFIX`] bytes, `…` and its length.
 fn origin_key(origin: Option<&str>) -> Box<str> {
-    match origin.unwrap_or("") {
-        o if o.len() > MAX_ORIGIN => TOO_LONG_ORIGIN.into(),
-        o => o.into(),
+    let origin = origin.unwrap_or("");
+    if origin.len() <= MAX_ORIGIN {
+        return origin.into();
     }
+    // Still names the site; a real origin has no space, so the marker cannot collide with one.
+    let cut = origin.floor_char_boundary(LONG_ORIGIN_PREFIX);
+    format!("{}… ({} bytes)", &origin[..cut], origin.len()).into()
 }
 
 impl TrackerEndpoint {
@@ -320,5 +326,18 @@ mod tests {
         // EMFILE (24 on Linux and macOS) and others stay errors.
         assert!(!super::client_aborted(&Error::from_raw_os_error(24)));
         assert!(!super::client_aborted(&Error::from(ErrorKind::OutOfMemory)));
+    }
+
+    #[test]
+    fn origins_are_kept_up_to_512_bytes_and_long_ones_shortened() {
+        use super::origin_key;
+        let valid = format!("https://{}:65535", "h".repeat(253)); // the longest https origin
+        assert_eq!(&*origin_key(Some(&valid)), valid);
+        let max = "é".repeat(256); // 512 bytes: kept; one byte more is shortened
+        assert_eq!(&*origin_key(Some(&max)), max);
+        assert!(origin_key(Some(&format!("{max}a"))).ends_with("… (513 bytes)"));
+        let long = format!("https://{}{}", "a".repeat(55), "é".repeat(300)); // é at bytes 63..65
+        let key = origin_key(Some(&long));
+        assert_eq!(&*key, format!("https://{}… (663 bytes)", "a".repeat(55)));
     }
 }

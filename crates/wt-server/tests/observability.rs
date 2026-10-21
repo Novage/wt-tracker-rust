@@ -203,6 +203,7 @@ async fn swarms_lists_the_largest_swarms_of_all_shards() {
 
     let top = get("/swarms?top=3").await;
     assert_eq!(top["total"], 6, "{top}");
+    assert_eq!(top["missing"], serde_json::json!([]), "{top}");
     let swarms = top["swarms"].as_array().unwrap();
     let peers: Vec<u64> = swarms
         .iter()
@@ -447,7 +448,7 @@ async fn wait_origins(server: &wt_server::Server, want: &[(&str, u64, u64)]) -> 
 }
 
 /// Spec §13.7: `/origins` counts the open connections per `Origin` (and how many announced),
-/// most first, over all workers; `""` is no `Origin`; a too long value is `"(too long)"`.
+/// most first, over all workers; `""` is no `Origin`; a value over 512 bytes is shortened.
 #[tokio::test(flavor = "multi_thread")]
 async fn origins_count_connections_per_origin() {
     let server = plain(2);
@@ -472,7 +473,8 @@ async fn origins_count_connections_per_origin() {
             .unwrap(),
     );
     keep.push(connect_with_origin(&server, None).await.unwrap());
-    let long = format!("https://{}.example", "a".repeat(300));
+    let long = format!("https://{}.example", "a".repeat(600));
+    let shortened = format!("https://{}… ({} bytes)", "a".repeat(56), long.len());
     keep.push(connect_with_origin(&server, Some(&long)).await.unwrap());
 
     let v = wait_origins(
@@ -480,7 +482,7 @@ async fn origins_count_connections_per_origin() {
         &[
             ("https://a.example", 3, 2),
             ("", 1, 0),
-            ("(too long)", 1, 0),
+            (&shortened, 1, 0),
             ("https://b.example", 1, 0),
         ],
     )
@@ -490,6 +492,7 @@ async fn origins_count_connections_per_origin() {
         (Some(4), Some(6)),
         "{v}"
     );
+    assert_eq!(v["missing"], serde_json::json!([]), "{v}");
 
     let top = origins(&server, "?top=1").await;
     assert_eq!(origin_rows(&top), [("https://a.example".to_string(), 3, 2)]);

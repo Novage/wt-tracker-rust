@@ -11,8 +11,8 @@ What you get:
 
 - `wss://tracker.example.com` on port 443 (TLS, certificate reloaded on renewal: connections stay).
 - Optional: `ws://` and `http://` on port 80 (redirected to the tracker's plain listener).
-- Optional: Prometheus `/metrics` and `/swarms` on `127.0.0.1:9100`, or over HTTPS with a
-  password for Grafana Cloud's free tier (section 11).
+- Optional: Prometheus `/metrics`, `/swarms` and `/origins` on `127.0.0.1:9100`, or over HTTPS
+  with a password for Grafana Cloud's free tier (section 11).
 
 ## 1. Create the instance
 
@@ -172,7 +172,8 @@ EOF
   that grow with the swarm size in big live events. The Always Free tier includes **10 TB of
   egress per month** (about 3.86 MB/s on average), which is the real limit: about 120k peers on
   average at ~31 B/s each.
-- `metrics`: Prometheus `/metrics` and `/swarms` on localhost only. Remove it if not needed.
+- `metrics`: Prometheus `/metrics`, `/swarms` (the largest swarms) and `/origins` (open
+  connections per website) on localhost only. Remove it if not needed.
 - Every setting: [README](../README.md#configuration) and [spec §13.1](SPEC.md#131-configuration-js-format).
 
 ### systemd unit: `/etc/systemd/system/wt-tracker-rust.service`

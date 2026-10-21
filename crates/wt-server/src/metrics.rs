@@ -92,30 +92,37 @@ async fn serve(me: Rc<Worker>, stream: TcpStream, peer: SocketAddr) {
                 body.as_bytes(),
             )
         }
-        ("GET", "/swarms") => match stats::query_param(query, "top").map(str::parse::<usize>) {
-            None => swarms_response(&me, DEFAULT_TOP).await,
-            Some(Ok(top)) => swarms_response(&me, top).await,
-            Some(Err(_)) => http::response("400 Bad Request", None, b"top must be a number"),
+        ("GET", "/swarms") => match top(query) {
+            Ok(top) => json_ok(stats::swarms_json(&me, top).await),
+            Err(bad) => bad,
+        },
+        ("GET", "/origins") => match top(query) {
+            Ok(top) => json_ok(stats::origins_json(&me, top).await),
+            Err(bad) => bad,
         },
         ("GET", "/stats.json") => stats::response(&me, query).await,
-        ("GET", "/origins") => match stats::query_param(query, "top").map(str::parse::<usize>) {
-            None => origins_response(&me, DEFAULT_TOP).await,
-            Some(Ok(top)) => origins_response(&me, top).await,
-            Some(Err(_)) => http::response("400 Bad Request", None, b"top must be a number"),
-        },
         _ => http::response("404 Not Found", None, b"404 Not Found"),
     };
     let _ = io.write_all(&response).await;
     io.shutdown().await;
 }
 
-async fn origins_response(me: &Rc<Worker>, top: usize) -> Vec<u8> {
-    let body = stats::origins_json(me, top).await;
-    http::response("200 OK", Some("application/json"), body.as_bytes())
+/// The `top` parameter of `/swarms` and `/origins` ([`DEFAULT_TOP`] if absent); not a number →
+/// the `400` response.
+fn top(query: &str) -> Result<usize, Vec<u8>> {
+    match stats::query_param(query, "top").map(str::parse) {
+        None => Ok(DEFAULT_TOP),
+        Some(Ok(top)) => Ok(top),
+        Some(Err(_)) => Err(http::response(
+            "400 Bad Request",
+            None,
+            b"top must be a number",
+        )),
+    }
 }
 
-async fn swarms_response(me: &Rc<Worker>, top: usize) -> Vec<u8> {
-    let body = stats::swarms_json(me, top).await;
+/// A `200 OK` response with a JSON body.
+fn json_ok(body: String) -> Vec<u8> {
     http::response("200 OK", Some("application/json"), body.as_bytes())
 }
 

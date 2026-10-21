@@ -497,8 +497,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   reload, a rejected key reported on each reload, the counters. `logging.rs`: civil dates both
   ways.
 - `tests/observability.rs` (§13.7): `/swarms` (top 3 of 6 swarms over 4 shards by peers,
-  `total`, `top=0` / default = all, `top=x` → 400, not on the public listener, its hex matching
-  `?infoHash=`); connections counted by reason (`client_close`, `rejected`
+  `total`, `missing` empty, `top=0` / default = all, `top=x` → 400, not on the public listener,
+  its hex matching `?infoHash=`); connections counted by reason (`client_close`, `rejected`
   with `invalid_json`, `too_big`, `eof`, `bad_request`, `idle_timeout`); answers to an unknown
   peer spread over 4 shards (`hash`, some dropped by a remote shard) are counted in
   `wt_dropped_answers_total` and the connections stay open, while an answer without `info_hash`
@@ -510,16 +510,19 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   `wt_tls_certificate_expiry_seconds`) whose `/metrics` exports every `wt_*` / `process_*` name
   used by `monitoring/grafana-dashboard.json` and `monitoring/alerts.yaml` (the Linux-only
   series checked on Linux); `/origins` (connections and announced per origin over 2 workers,
-  `""` without `Origin`, `"(too long)"`, `top=1` with `total`, `top=x` → 400, not on the public
-  listener, closed connections no longer counted) and a connection moved at its first announce
-  (4 workers, `content`) counted once. `tests/suite`: the exact
+  `""` without `Origin`, a 616-byte origin shortened, `top=1` with `total`, `top=x` → 400, not
+  on the public listener, closed connections no longer counted, `missing` empty) and a
+  connection moved at its first announce (4 workers, `content`) counted once. `tests/suite`: the
+  exact
   `/stats.json` keys, `?infoHash=` (unknown swarm, malformed → 400), `/metrics` only on its own
   listener, `wt_http_requests_total`; a partial seed announcing `"paused"` from its first
   announce on is added as incomplete, its offer is delivered and its connection stays open
   (`wt-proto/tests/parse.rs`: `"paused"` → no event; `"update"`, `"pause"`, `"Paused"` stay
   `UnknownEvent`). Unit tests: logfmt quoting, RFC 3339 timestamps, the rate
   limit, label uniqueness, metric text escaping, info_hash hex and query parsing, the merge and
-  order of `/origins` across workers; `auth.rs`
+  order of `/origins` across workers and its `top` against a full sort, the `missing` workers of
+  a gather; `conn.rs` (origins up to 512 bytes kept, a 267-byte valid origin exactly, longer ones
+  shortened at a character boundary); `auth.rs`
   (right credentials in any scheme case pass; a wrong user or password, no `:`, empty, another
   scheme, bad base64 or no header fail); `config.rs` (the metrics pairs, empty and `:` values,
   the clear-text warning); `process.rs` (`stat`, `limits` and `netstat` parsing; on Linux, this
@@ -794,8 +797,8 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   scraper (Grafana Cloud's Metrics Endpoint needs an HTTPS URL) can read it from the internet;
   `/metrics` adds process CPU, file descriptors, CPU per worker thread and kernel listen-queue
   overflows (Linux). `monitoring/` has a Grafana dashboard, alert rules and a setup guide built
-  on `/metrics` alone. Open: publish the dashboard on grafana.com. `/origins` lists the open
-  connections per website (`Origin`), to see which sites use the tracker.
+  on `/metrics` alone. `/origins` lists the open connections per website (`Origin`), to see
+  which sites use the tracker. Open: publish the dashboard on grafana.com.
 
 ## 13. Server (`crates/wt-server`, binary `wt-tracker`)
 
@@ -996,11 +999,12 @@ endpoints. No swarm list is copied.
 `/metrics` (§13.7).
 
 `GET /stats.json?infoHash=<hex>` (2 to 80 hex digits, any case): one swarm,
-`{"infoHash":"<lowercase hex>", "peers", "workers":[{"worker", "peers"}]}` with the workers whose
-shard has it (normally one; `[]` and 0 if none). The hex encodes the info_hash as clients send it,
-a "binary" string with one character per byte, so a byte ≥ 0x80 is the key's two UTF-8 bytes.
-Malformed hex → `400 Bad Request`. The list of swarms is on the private listener (`/swarms`,
-§13.7).
+`{"infoHash":"<lowercase hex>", "peers", "workers":[{"worker", "peers"}], "missing":[...]}` with
+the workers whose shard has it (normally one; `[]` and 0 if none) and the workers that did not
+answer within 1 s (`missing`, as in §13.7; their peers are not counted). The hex encodes the
+info_hash as clients send it, a "binary" string with one character per byte, so a byte ≥ 0x80 is
+the key's two UTF-8 bytes. Malformed hex → `400 Bad Request`. The list of swarms is on the
+private listener (`/swarms`, §13.7).
 
 ### 13.6 Shutdown
 
@@ -1043,20 +1047,33 @@ Every response closes the connection; it is not counted in `wt_http_requests_tot
 
 `GET /swarms?top=N` (default 100; 0 = all; not a number → 400): the largest swarms of all
 workers, `{"swarms":[{"infoHash":"<hex as in §13.5>", "peers", "worker"}], "total":<swarms of
-all workers>}`, most peers first, equal counts by hex (which swarms make the cut among equal counts
+the workers that answered>, "missing":[<workers that did not answer within 1 s>]}`, most peers
+first, equal counts by hex (which swarms make the cut among equal counts
 at the limit is arbitrary). Each worker returns only its own `top` (an `Event::Swarms` gather as in
 §13.4, copying just those keys). It shows what viewers watch, hence the private listener.
 
 `GET /origins?top=N` (default 100; 0 = all; not a number → 400): the open WebSocket connections
 per request `Origin` header of all workers, `{"origins":[{"origin", "connections",
-"announced"}], "total":<distinct origins>, "connections":<all counted>}`, most connections first,
-equal counts by origin. Every connection keeps its `Origin` (`ConnEntry.origin`, set at
-`Worker::register`; `""` = no header, a value over 255 bytes is kept as `"(too long)"`); a
-connection that moves to another worker (§13.3) takes it along (`conn::Adopt.origin`) and is
-counted once, on the worker that holds it. Each worker answers an `Event::Origins` gather (as in
-§13.4, 1 s timeout) by one pass over its open (not closing) connections; `announced`: those that
-announced at least once (`shard_mask` ≠ 0), close to the number of peers. Origins are not
-`/metrics` series (an open set).
+"announced"}], "total":<distinct origins>, "connections":<all counted>, "missing":[<workers that
+did not answer within 1 s>]}`, most connections first, equal counts by origin (the requesting
+worker merges all workers' counts, selects the first `top` in linear time and sorts only those:
+clients choose `Origin`, so there can be one per connection). Every connection keeps its `Origin`
+(`ConnEntry.origin`, set at `Worker::register`): the header value after trimming, decoded as UTF-8
+(invalid bytes replaced by U+FFFD, `http::parse_head`); `""` = no header; up to 512 bytes as is,
+which every valid origin fits (`https://` + a 253-byte host + `:65535` = 267 bytes, ASCII); a
+longer value as its first 64 bytes, cut at a character boundary, + `… (<length> bytes)` (the
+decoded length): it still names the site, and its space cannot occur in a real origin, so it
+cannot collide with one. A connection that moves to another worker (§13.3) takes its origin along
+(`conn::Adopt.origin`) and is counted once, on the worker that holds it (while it moves, between
+the old worker's `remove` and the new worker's `register`, it is counted on neither: a snapshot
+can miss the few connections moving at that moment). Each worker answers an `Event::Origins`
+gather (as in §13.4, 1 s timeout) by one pass over its open (not closing) connections; a worker
+that does not answer contributes nothing and is listed in `missing` (empty normally), so a
+partial result is visible. `announced`: the connections that announced at least once
+(`shard_mask` ≠ 0, never cleared). It is not a peer count: one connection can hold many peers (a
+WebTorrent client uses one WebSocket per tracker for all its torrents), and a connection whose
+peers stopped or expired still counts as announced. Origins are not `/metrics` series (an open
+set).
 
 `/metrics`: Prometheus text format 0.0.4 (`text/plain; version=0.0.4`). Per-worker series
 carry `worker="N"`; counters are totals since start, kept per worker in plain cells (no atomics on

@@ -302,8 +302,12 @@ async fn http_routes_and_ws_path() {
     // An unknown swarm, and a malformed infoHash.
     let unknown = swarm(&server, "nothing here").await;
     assert_eq!(
-        (unknown["peers"].clone(), unknown["workers"].clone()),
-        (0.into(), serde_json::json!([]))
+        (
+            unknown["peers"].clone(),
+            unknown["workers"].clone(),
+            unknown["missing"].clone()
+        ),
+        (0.into(), serde_json::json!([]), serde_json::json!([]))
     );
     assert_eq!(
         http_get(addr, "/stats.json?infoHash=xyz").await.0,

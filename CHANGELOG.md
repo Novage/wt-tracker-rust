@@ -53,7 +53,8 @@ All notable changes to this project are listed here. The format follows
   Structured logs: one logfmt line per event on stderr (`logLevel`; rate-limited rejected
   messages and accept errors; every close with its reason at `debug`).
 - `/stats.json?infoHash=<hex>`: peers of one swarm and the workers holding it.
-- `/swarms?top=N` on the private listener: the largest swarms (hex info_hash, peers, worker).
+- `/swarms?top=N` on the private listener: the largest swarms (hex info_hash, peers, worker), and
+  the workers that did not answer in time (`missing`).
 - Install guide for Oracle Cloud Ampere A1 (Always Free) with certbot:
   `docs/install-oracle-ampere-a1.md`.
 - TLS certificate reload without a restart on SIGHUP (e.g. `systemctl reload` from a certbot
@@ -71,7 +72,8 @@ All notable changes to this project are listed here. The format follows
 
 - `/origins` on the metrics listener: open connections per website (`Origin` header) over all
   workers, most first, with how many of them announced, to see which sites use the tracker
-  before blocking any with `websocketsAccess`.
+  before blocking any with `websocketsAccess`. `/origins` and `/stats.json?infoHash=` list the
+  workers that did not answer in time (`missing`), so a partial result is visible.
 
 ### Changed
 

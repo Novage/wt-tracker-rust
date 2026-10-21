@@ -3,14 +3,13 @@
 //! listener (spec §13.7).
 
 use std::collections::HashMap;
-
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
 
 use serde_json::{Value, json};
 
 use crate::http;
-use crate::worker::{OriginCounts, Worker};
+use crate::worker::{OriginCounts, TopSwarms, Worker};
 
 /// The `/stats.json` response for a request's query string: the summary, or one swarm with
 /// `infoHash` (`400` if it is not hex). Public and metrics listeners alike.
@@ -56,26 +55,43 @@ pub(crate) async fn json(me: &Rc<Worker>) -> String {
 pub(crate) async fn swarm_json(me: &Rc<Worker>, hex: &str) -> Option<String> {
     let info_hash = info_hash_from_hex(hex)?;
     let per_worker = me.swarm_peers(&info_hash).await;
+    let missing = missing(&per_worker);
     let workers: Vec<Value> = per_worker
         .iter()
         .enumerate()
-        .filter_map(|(worker, peers)| peers.map(|p| json!({ "worker": worker, "peers": p })))
+        .filter_map(|(worker, peers)| {
+            peers
+                .flatten()
+                .map(|p| json!({ "worker": worker, "peers": p }))
+        })
         .collect();
-    let peers: u64 = per_worker.iter().flatten().map(|&p| u64::from(p)).sum();
+    let peers: u64 = per_worker
+        .iter()
+        .flatten()
+        .flatten()
+        .map(|&p| u64::from(p))
+        .sum();
     Some(
         json!({
             "infoHash": hex.to_ascii_lowercase(),
             "peers": peers,
             "workers": workers,
+            "missing": missing,
         })
         .to_string(),
     )
 }
 
 /// The largest swarms of all workers, most peers first (ties by hex): `{"swarms":[{"infoHash",
-/// "peers", "worker"}], "total"}`, at most `top` of them (0: all). `total`: swarms of all workers.
+/// "peers", "worker"}], "total", "missing"}`, at most `top` of them (0: all). `total`: swarms of
+/// all workers that answered; `missing`: workers that did not answer in time.
 pub(crate) async fn swarms_json(me: &Rc<Worker>, top: usize) -> String {
     let per_worker = me.top_swarms(top).await;
+    let missing = missing(&per_worker);
+    let per_worker: Vec<TopSwarms> = per_worker
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect();
     let total: usize = per_worker.iter().map(|(_, total)| total).sum();
     let mut swarms: Vec<(u32, String, usize)> = per_worker
         .into_iter()
@@ -94,21 +110,35 @@ pub(crate) async fn swarms_json(me: &Rc<Worker>, top: usize) -> String {
         .into_iter()
         .map(|(peers, hex, worker)| json!({ "infoHash": hex, "peers": peers, "worker": worker }))
         .collect();
-    json!({ "swarms": swarms, "total": total }).to_string()
+    json!({ "swarms": swarms, "total": total, "missing": missing }).to_string()
+}
+
+/// Workers that did not answer a gather in time: their part is missing from the result.
+fn missing<T>(per_worker: &[Option<T>]) -> Vec<usize> {
+    per_worker
+        .iter()
+        .enumerate()
+        .filter_map(|(worker, r)| r.is_none().then_some(worker))
+        .collect()
 }
 
 /// Open connections per origin of all workers, most first (ties by origin): `{"origins":
-/// [{"origin", "connections", "announced"}], "total", "connections"}`, at most `top` of them (0:
-/// all). `total`: distinct origins; `connections`: all open connections counted.
+/// [{"origin", "connections", "announced"}], "total", "connections", "missing"}`, at most `top` of
+/// them (0: all). `total`: distinct origins; `connections`: all open connections counted;
+/// `missing`: workers that did not answer in time (their connections are not counted).
 pub(crate) async fn origins_json(me: &Rc<Worker>, top: usize) -> String {
-    let (origins, total, connections) = merge_origins(me.origins().await, top);
+    let per_worker = me.origins().await;
+    let missing = missing(&per_worker);
+    let (origins, total, connections) =
+        merge_origins(per_worker.into_iter().flatten().collect(), top);
     let origins: Vec<Value> = origins
         .into_iter()
         .map(|(origin, connections, announced)| {
             json!({ "origin": origin, "connections": connections, "announced": announced })
         })
         .collect();
-    json!({ "origins": origins, "total": total, "connections": connections }).to_string()
+    json!({ "origins": origins, "total": total, "connections": connections, "missing": missing })
+        .to_string()
 }
 
 /// `(origin, connections, announced)` most first, distinct origins, all connections.
@@ -127,10 +157,17 @@ fn merge_origins(per_worker: Vec<OriginCounts>, top: usize) -> MergedOrigins {
     let connections = merged.values().map(|m| m.0).sum();
     let mut origins: Vec<(Box<str>, u64, u64)> =
         merged.into_iter().map(|(o, (c, a))| (o, c, a)).collect();
-    origins.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    if top > 0 {
+    // Most connections first, ties by origin (a total order: origins are distinct). Clients
+    // choose `Origin`, so there can be one per connection: select the first `top` in linear
+    // time and sort only those, as `top_swarms` does.
+    let order = |a: &(Box<str>, u64, u64), b: &(Box<str>, u64, u64)| {
+        b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+    };
+    if top > 0 && origins.len() > top {
+        origins.select_nth_unstable_by(top - 1, order);
         origins.truncate(top);
     }
+    origins.sort_unstable_by(order);
     (origins, total, connections)
 }
 
@@ -211,6 +248,12 @@ mod tests {
     }
 
     #[test]
+    fn workers_without_an_answer_are_listed() {
+        assert_eq!(missing(&[Some(1), None, Some(3), None]), [1, 3]);
+        assert!(missing::<u8>(&[Some(1), Some(2)]).is_empty());
+    }
+
+    #[test]
     fn origins_merge_across_workers_most_first() {
         let w0: OriginCounts = vec![("https://a".into(), 3, 2), ("".into(), 1, 0)];
         let w1: OriginCounts = vec![("https://a".into(), 1, 1), ("https://b".into(), 4, 4)];
@@ -227,6 +270,16 @@ mod tests {
         let (top, total, _) = merge_origins(vec![w0, w1], 1);
         assert_eq!((top.len(), total), (1, 3));
         assert_eq!(merge_origins(Vec::new(), 10), (Vec::new(), 0, 0));
+    }
+
+    #[test]
+    fn origins_top_matches_a_full_sort() {
+        let w: OriginCounts = (0..50u32)
+            .map(|i| (format!("o{i}").into(), i % 7, 0))
+            .collect();
+        let (all, _, _) = merge_origins(vec![w.clone()], 0);
+        let (top, _, _) = merge_origins(vec![w], 10);
+        assert_eq!(top, all[..10]);
     }
 
     #[test]

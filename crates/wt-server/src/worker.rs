@@ -480,14 +480,11 @@ impl Worker {
             .collect()
     }
 
-    /// Open connections per origin of every worker, in worker order; a worker that does not
-    /// answer in time contributes none.
-    pub async fn origins(self: &Rc<Self>) -> Vec<OriginCounts> {
+    /// Open connections per origin of every worker, in worker order (`None`: the worker did
+    /// not answer in time).
+    pub async fn origins(self: &Rc<Self>) -> Vec<Option<OriginCounts>> {
         self.gather(|reply| Event::Origins { reply }, Self::origin_counts)
             .await
-            .into_iter()
-            .map(Option::unwrap_or_default)
-            .collect()
     }
 
     /// Closes a connection whose message was rejected (1008), local or on another worker.
@@ -847,8 +844,8 @@ impl Worker {
         .collect()
     }
 
-    /// Peers of one swarm in every worker (`None`: no swarm there, or no answer).
-    pub async fn swarm_peers(self: &Rc<Self>, info_hash: &[u8]) -> Vec<Option<u32>> {
+    /// Peers of one swarm in every worker (outer `None`: no answer in time; inner: no swarm).
+    pub async fn swarm_peers(self: &Rc<Self>, info_hash: &[u8]) -> Vec<Option<Option<u32>>> {
         self.gather(
             |reply| Event::Swarm {
                 info_hash: info_hash.to_vec(),
@@ -857,22 +854,16 @@ impl Worker {
             |me| me.shard.borrow().swarm_stats(info_hash).map(|s| s.peers),
         )
         .await
-        .into_iter()
-        .map(Option::flatten)
-        .collect()
     }
 
-    /// The largest swarms of every worker (`top` each, 0: all), in worker order; a worker that
-    /// does not answer in time contributes none.
-    pub async fn top_swarms(self: &Rc<Self>, top: usize) -> Vec<TopSwarms> {
+    /// The largest swarms of every worker (`top` each, 0: all), in worker order (`None`: the
+    /// worker did not answer in time).
+    pub async fn top_swarms(self: &Rc<Self>, top: usize) -> Vec<Option<TopSwarms>> {
         self.gather(
             |reply| Event::Swarms { top, reply },
             |me| top_swarms(&me.shard.borrow(), top),
         )
         .await
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect()
     }
 
     /// Asks every worker (`local` for this one, an event for the others); `None` for a worker
