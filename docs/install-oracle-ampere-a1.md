@@ -71,10 +71,23 @@ On a fresh image the `REJECT` rule is number 5 (after ESTABLISHED, icmp, lo and 
 
 ```bash
 sudo iptables -I INPUT 5 -p tcp -m state --state NEW -m tcp --dport 80 -j ACCEPT
-sudo iptables -I INPUT 6 -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT
+sudo iptables -I INPUT 6 -p tcp -m tcp --dport 443 -j ACCEPT
+sudo iptables -t raw -A PREROUTING -p tcp -m tcp --dport 443 -j CT --notrack
+sudo iptables -t raw -A OUTPUT -p tcp -m tcp --sport 443 -j CT --notrack
 sudo iptables -S INPUT                  # 80 and 443 must come before "-A INPUT -j REJECT"
 sudo netfilter-persistent save          # keep them after a reboot (/etc/iptables/rules.v4)
 ```
+
+The `raw` rules keep the tracker's port 443 out of the kernel's connection tracking. The image's
+first rule (`-m state --state RELATED,ESTABLISHED -j ACCEPT`) makes the kernel track every
+connection, and its table holds 262,144 entries by default (`nf_conntrack_max`). With about
+200,000 viewers it fills up and the kernel drops packets of new connections (`nf_conntrack:
+table full, dropping packet` in `journalctl -k`); tracked connections also take longer to close
+when the tracker restarts. Port 443 therefore accepts every packet, without a state check
+(untracked packets have no state). Port 80 stays tracked: its redirect to the tracker's plain
+listener (section 10) is NAT, which needs tracking. The server's own HTTPS downloads (apt,
+certbot) are not affected: their replies come from remote port 443 to a local port, which the
+rules do not match.
 
 If iptables answers `Couldn't load match 'state'` (an nftables-based build), use the
 equivalent `-m conntrack --ctstate NEW` instead of `-m state --state NEW`.
@@ -370,6 +383,10 @@ back, copy `wt-tracker.prev` back and restart.
 - **New connections and SSH time out, existing peers keep working:** Oracle's connection
   tracking is full; make the 80 / 443 rules stateless (section 2). Reboot from the console if
   SSH is unreachable (do not terminate the instance).
+- **New connections are dropped at peaks or right after a restart, and `journalctl -k` shows
+  `nf_conntrack: table full, dropping packet`:** the instance's own connection tracking is full;
+  add the `raw` `NOTRACK` rules of section 3 (no restart needed). `cat
+  /proc/sys/net/netfilter/nf_conntrack_count` shows how many connections it tracks.
 - **A port is closed from outside:** check both the security list (section 2) and
   `sudo iptables -S INPUT` (section 3: before the `REJECT` rule).
 - **Renewal failed:** `sudo tail -50 /var/log/letsencrypt/letsencrypt.log`. With section 10, the
