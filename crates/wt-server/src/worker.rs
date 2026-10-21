@@ -57,6 +57,10 @@ pub(crate) enum Event {
         top: usize,
         reply: oneshot::Sender<TopSwarms>,
     },
+    /// Open connections of this worker per `Origin`, for `/origins`.
+    Origins {
+        reply: oneshot::Sender<OriginCounts>,
+    },
     /// A connection moved to this worker at its first message (`content` placement).
     Adopt(Box<conn::Adopt>),
     /// A request of the connection was forwarded to `shard`: it may hold its peers now.
@@ -94,6 +98,10 @@ pub(crate) struct ShardStats {
 
 /// A shard's largest swarms `(info_hash key, peers)`, and its swarm count.
 pub(crate) type TopSwarms = (Vec<(Vec<u8>, u32)>, usize);
+
+/// One worker's open connections per `Origin`: `(origin, connections, announced)`, for
+/// `/origins` (spec §13.7). `announced`: connections that announced at least once.
+pub(crate) type OriginCounts = Vec<(Box<str>, u32, u32)>;
 
 /// How long a stats gather waits for each other worker.
 const STATS_TIMEOUT: Duration = Duration::from_secs(1);
@@ -159,6 +167,8 @@ struct ConnEntry {
     closing: bool,
     /// Its first message was handled: it stays on this worker.
     placed: bool,
+    /// The request's `Origin` header (`""`: none), for `/origins`.
+    origin: Box<str>,
 }
 
 /// `ConnId` layout: worker (8 bits) | generation (24) | slot (32).
@@ -318,7 +328,7 @@ impl Worker {
 
     /// Registers a WebSocket connection: its id, writer wake-up and reader stop signal.
     /// `placed`: the connection already handled its first message (it moved here).
-    pub fn register(&self, placed: bool) -> (ConnId, Rc<Notify>, Rc<Notify>) {
+    pub fn register(&self, placed: bool, origin: Box<str>) -> (ConnId, Rc<Notify>, Rc<Notify>) {
         let generation = self.next_generation.get().wrapping_add(1) & 0xFF_FFFF;
         self.next_generation.set(generation);
         let notify = Rc::new(Notify::new());
@@ -332,6 +342,7 @@ impl Worker {
             shard_mask: 0,
             closing: false,
             placed,
+            origin,
         });
         if placed {
             self.moved_in.set(self.moved_in.get() + 1);
@@ -439,16 +450,44 @@ impl Worker {
         }
     }
 
-    /// Frees the slot after the writer finished.
-    pub fn remove(&self, conn: ConnId) {
+    /// Frees the slot after the writer finished; returns the connection's origin (for a
+    /// connection that moves to another worker).
+    pub fn remove(&self, conn: ConnId) -> Option<Box<str>> {
         let mut conns = self.conns.borrow_mut();
         if conns
             .get(conn_slot(conn))
             .is_some_and(|e| e.generation == conn_generation(conn))
         {
-            conns.remove(conn_slot(conn));
+            let entry = conns.remove(conn_slot(conn));
             self.shared.loads.add_conn(self.id, -1);
+            return Some(entry.origin);
         }
+        None
+    }
+
+    /// Open connections per origin, with how many of them announced (spec §13.7).
+    fn origin_counts(&self) -> OriginCounts {
+        let mut counts: HashMap<&str, (u32, u32)> = HashMap::new();
+        let conns = self.conns.borrow();
+        for (_, entry) in conns.iter().filter(|(_, e)| !e.closing) {
+            let c = counts.entry(&entry.origin).or_default();
+            c.0 += 1;
+            c.1 += u32::from(entry.shard_mask != 0);
+        }
+        counts
+            .into_iter()
+            .map(|(origin, (connections, announced))| (origin.into(), connections, announced))
+            .collect()
+    }
+
+    /// Open connections per origin of every worker, in worker order; a worker that does not
+    /// answer in time contributes none.
+    pub async fn origins(self: &Rc<Self>) -> Vec<OriginCounts> {
+        self.gather(|reply| Event::Origins { reply }, Self::origin_counts)
+            .await
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect()
     }
 
     /// Closes a connection whose message was rejected (1008), local or on another worker.
@@ -681,6 +720,9 @@ impl Worker {
                         }
                         Event::Swarms { top, reply } => {
                             let _ = reply.send(top_swarms(&shard, top));
+                        }
+                        Event::Origins { reply } => {
+                            let _ = reply.send(self.origin_counts());
                         }
                         Event::Adopt(adopt) => {
                             spawn_local(conn::adopted(self.clone(), *adopt));

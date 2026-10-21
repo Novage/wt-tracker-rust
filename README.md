@@ -110,8 +110,9 @@ connections per listener, memory, workers, uptime; `?infoHash=<hex>` for one swa
 With `metrics` set, `GET /metrics` on that listener: Prometheus metrics per worker (messages and
 bytes sent / received per kind, rejected messages and closed connections by reason, socket and
 compression bytes, placement counters, process and per-worker CPU, file descriptors), `GET
-/swarms?top=100`: the largest swarms with their hex info_hash, peers and worker, and `GET
-/stats.json` ([spec §13.7](docs/SPEC.md#137-metrics-and-swarms)). Dashboard, alerts and setup:
+/swarms?top=100`: the largest swarms with their hex info_hash, peers and worker, `GET
+/origins?top=100`: open connections per website (`Origin` header), and `GET /stats.json`
+([spec §13.7](docs/SPEC.md#137-metrics-swarms-and-origins)). Dashboard, alerts and setup:
 [`monitoring/`](monitoring/README.md).
 
 Logs: one logfmt line per event on stderr, e.g. `level=info event=listening addr=0.0.0.0:443`

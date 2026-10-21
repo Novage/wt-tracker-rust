@@ -509,13 +509,17 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   response, 401 without auth, its certificate reloaded by `Server::reload_tls` and shown in
   `wt_tls_certificate_expiry_seconds`) whose `/metrics` exports every `wt_*` / `process_*` name
   used by `monitoring/grafana-dashboard.json` and `monitoring/alerts.yaml` (the Linux-only
-  series checked on Linux). `tests/suite`: the exact
+  series checked on Linux); `/origins` (connections and announced per origin over 2 workers,
+  `""` without `Origin`, `"(too long)"`, `top=1` with `total`, `top=x` → 400, not on the public
+  listener, closed connections no longer counted) and a connection moved at its first announce
+  (4 workers, `content`) counted once. `tests/suite`: the exact
   `/stats.json` keys, `?infoHash=` (unknown swarm, malformed → 400), `/metrics` only on its own
   listener, `wt_http_requests_total`; a partial seed announcing `"paused"` from its first
   announce on is added as incomplete, its offer is delivered and its connection stays open
   (`wt-proto/tests/parse.rs`: `"paused"` → no event; `"update"`, `"pause"`, `"Paused"` stay
   `UnknownEvent`). Unit tests: logfmt quoting, RFC 3339 timestamps, the rate
-  limit, label uniqueness, metric text escaping, info_hash hex and query parsing; `auth.rs`
+  limit, label uniqueness, metric text escaping, info_hash hex and query parsing, the merge and
+  order of `/origins` across workers; `auth.rs`
   (right credentials in any scheme case pass; a wrong user or password, no `:`, empty, another
   scheme, bad base64 or no header fail); `config.rs` (the metrics pairs, empty and `:` values,
   the clear-text warning); `process.rs` (`stat`, `limits` and `netstat` parsing; on Linux, this
@@ -790,7 +794,8 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   scraper (Grafana Cloud's Metrics Endpoint needs an HTTPS URL) can read it from the internet;
   `/metrics` adds process CPU, file descriptors, CPU per worker thread and kernel listen-queue
   overflows (Linux). `monitoring/` has a Grafana dashboard, alert rules and a setup guide built
-  on `/metrics` alone. Open: publish the dashboard on grafana.com.
+  on `/metrics` alone. Open: publish the dashboard on grafana.com. `/origins` lists the open
+  connections per website (`Origin`), to see which sites use the tracker.
 
 ## 13. Server (`crates/wt-server`, binary `wt-tracker`)
 
@@ -838,7 +843,7 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
   waiting on a readable socket it no longer read: the worker spun at 100% CPU without yielding,
   its timeouts and connections stalled and its inbox grew until the OOM kill.)
 - `GET` with `Upgrade: websocket` on a matching path → `maxConnections` and origin checks (fail
-  → TCP close) → `101` with `Sec-WebSocket-Accept` (requested `Sec-WebSocket-Protocol` echoed,
+  → TCP close; the `Origin` of an upgraded connection is kept for `/origins`, §13.7) → `101` with `Sec-WebSocket-Accept` (requested `Sec-WebSocket-Protocol` echoed,
   like uws-tracker) and, if negotiated, `Sec-WebSocket-Extensions` (below). Bytes sent right
   after the head are kept.
 - Otherwise: `GET /` → `index.html` (200) or `404 Not Found`; `GET /stats.json` (§13.5); anything
@@ -1018,10 +1023,11 @@ Malformed hex → `400 Bad Request`. The list of swarms is on the private listen
   still open then (and HTTP requests in progress) are dropped.
 - `Server::shutdown` / dropping the `Server`: stop at once (in-process use, tests).
 
-### 13.7 `/metrics` and `/swarms`
+### 13.7 `/metrics`, `/swarms` and `/origins`
 
-The `metrics` listener (off without the setting, §13.1) serves `GET /metrics`, `GET /swarms` and
-`GET /stats.json` (the public response, §13.5, from `stats::response`); anything else → 404.
+The `metrics` listener (off without the setting, §13.1) serves `GET /metrics`, `GET /swarms`,
+`GET /origins` and `GET /stats.json` (the public response, §13.5, from `stats::response`);
+anything else → 404.
 Every response closes the connection; it is not counted in `wt_http_requests_total`.
 
 - **HTTPS** with `cert_file_name` + `key_file_name`: the rustls config of the wss:// listeners
@@ -1040,6 +1046,17 @@ workers, `{"swarms":[{"infoHash":"<hex as in §13.5>", "peers", "worker"}], "tot
 all workers>}`, most peers first, equal counts by hex (which swarms make the cut among equal counts
 at the limit is arbitrary). Each worker returns only its own `top` (an `Event::Swarms` gather as in
 §13.4, copying just those keys). It shows what viewers watch, hence the private listener.
+
+`GET /origins?top=N` (default 100; 0 = all; not a number → 400): the open WebSocket connections
+per request `Origin` header of all workers, `{"origins":[{"origin", "connections",
+"announced"}], "total":<distinct origins>, "connections":<all counted>}`, most connections first,
+equal counts by origin. Every connection keeps its `Origin` (`ConnEntry.origin`, set at
+`Worker::register`; `""` = no header, a value over 255 bytes is kept as `"(too long)"`); a
+connection that moves to another worker (§13.3) takes it along (`conn::Adopt.origin`) and is
+counted once, on the worker that holds it. Each worker answers an `Event::Origins` gather (as in
+§13.4, 1 s timeout) by one pass over its open (not closing) connections; `announced`: those that
+announced at least once (`shard_mask` ≠ 0), close to the number of peers. Origins are not
+`/metrics` series (an open set).
 
 `/metrics`: Prometheus text format 0.0.4 (`text/plain; version=0.0.4`). Per-worker series
 carry `worker="N"`; counters are totals since start, kept per worker in plain cells (no atomics on

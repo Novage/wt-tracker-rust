@@ -24,6 +24,9 @@ use crate::ws::driver::{self, Endpoint, Flow, Io, Limits, Parked};
 
 /// TLS handshake + HTTP request head must complete within this time.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longer `Origin` values are kept as [`TOO_LONG_ORIGIN`] (spec §13.7).
+const MAX_ORIGIN: usize = 255;
+const TOO_LONG_ORIGIN: &str = "(too long)";
 
 pub(crate) async fn accept_loop(me: Rc<Worker>, listener: usize, socket: TcpListener) {
     loop {
@@ -102,19 +105,20 @@ async fn serve(me: Rc<Worker>, listener: usize, stream: TcpStream, peer: SocketA
                 return ended(&me, CloseReason::SocketError, peer, opened);
             }
             info.web_sockets.fetch_add(1, Relaxed);
-            let endpoint = TrackerEndpoint::new(&me, false);
+            let endpoint = TrackerEndpoint::new(&me, false, origin_key(head.origin.as_deref()));
             let result = driver::run(io, rest, limits(&me, listener), deflate, &endpoint).await;
             let conn = endpoint.conn;
             match (result, endpoint.moving.take()) {
                 // Moved before anything was applied: no shard holds the connection.
                 (Ok(parked), Some((worker, first))) => {
-                    me.remove(conn);
+                    let origin = me.remove(conn).unwrap_or_default();
                     let adopt = Adopt {
                         listener,
                         first,
                         parked,
                         peer,
                         opened,
+                        origin,
                     };
                     me.push_remote(worker, Event::Adopt(Box::new(adopt)));
                 }
@@ -164,11 +168,12 @@ pub(crate) struct Adopt {
     parked: Parked,
     peer: SocketAddr,
     opened: Instant,
+    /// The request's `Origin`, counted on the worker that holds the connection.
+    origin: Box<str>,
 }
 
 /// Continues a connection that moved to this worker.
 pub(crate) async fn adopted(me: Rc<Worker>, adopt: Adopt) {
-    let endpoint = TrackerEndpoint::new(&me, true);
     let limits = limits(&me, adopt.listener);
     let Adopt {
         listener,
@@ -176,7 +181,9 @@ pub(crate) async fn adopted(me: Rc<Worker>, adopt: Adopt) {
         parked,
         peer,
         opened,
+        origin,
     } = adopt;
+    let endpoint = TrackerEndpoint::new(&me, true, origin);
     // Placed connections never detach again; a parked result would be dropped (closed).
     let reason = driver::resume(parked, first, limits, &endpoint)
         .await
@@ -251,9 +258,17 @@ struct TrackerEndpoint {
     moving: RefCell<Option<(usize, Bytes)>>,
 }
 
+/// The origin a connection is counted under: `""` without an `Origin` header.
+fn origin_key(origin: Option<&str>) -> Box<str> {
+    match origin.unwrap_or("") {
+        o if o.len() > MAX_ORIGIN => TOO_LONG_ORIGIN.into(),
+        o => o.into(),
+    }
+}
+
 impl TrackerEndpoint {
-    fn new(me: &Rc<Worker>, placed: bool) -> Self {
-        let (conn, notify, closed) = me.register(placed);
+    fn new(me: &Rc<Worker>, placed: bool, origin: Box<str>) -> Self {
+        let (conn, notify, closed) = me.register(placed, origin);
         if me.is_draining() {
             // Upgraded (or moved here) during a graceful shutdown.
             me.begin_close_with(conn, close::GOING_AWAY);

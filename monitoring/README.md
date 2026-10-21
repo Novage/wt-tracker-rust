@@ -37,7 +37,8 @@ Check it:
 curl -s -u grafana:a-long-random-password https://tracker.example.com:9000/metrics | head
 ```
 
-`/stats.json` and `/swarms` (the largest swarms) are served there too; a browser asks for the
+`/stats.json`, `/swarms` (the largest swarms) and `/origins` (open connections per website, from
+the `Origin` header: which sites use your tracker) are served there too; a browser asks for the
 password once.
 
 ## 2. Grafana Cloud (free tier)

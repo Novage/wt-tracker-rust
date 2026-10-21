@@ -1,5 +1,5 @@
-//! The metrics listener (spec §13.7): Prometheus `/metrics` (text format 0.0.4), `/swarms` and
-//! `/stats.json`; HTTPS and basic auth when configured.
+//! The metrics listener (spec §13.7): Prometheus `/metrics` (text format 0.0.4), `/swarms`,
+//! `/origins` and `/stats.json`; HTTPS and basic auth when configured.
 
 use std::fmt::{Display, Write as _};
 use std::net::SocketAddr;
@@ -18,7 +18,7 @@ use crate::ws::driver::Io;
 
 /// The TLS handshake and the request head must complete within this time.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
-/// `/swarms` without `top`.
+/// `/swarms` and `/origins` without `top`.
 const DEFAULT_TOP: usize = 100;
 
 /// Accepts scrapers on worker 0 until shutdown.
@@ -98,10 +98,20 @@ async fn serve(me: Rc<Worker>, stream: TcpStream, peer: SocketAddr) {
             Some(Err(_)) => http::response("400 Bad Request", None, b"top must be a number"),
         },
         ("GET", "/stats.json") => stats::response(&me, query).await,
+        ("GET", "/origins") => match stats::query_param(query, "top").map(str::parse::<usize>) {
+            None => origins_response(&me, DEFAULT_TOP).await,
+            Some(Ok(top)) => origins_response(&me, top).await,
+            Some(Err(_)) => http::response("400 Bad Request", None, b"top must be a number"),
+        },
         _ => http::response("404 Not Found", None, b"404 Not Found"),
     };
     let _ = io.write_all(&response).await;
     io.shutdown().await;
+}
+
+async fn origins_response(me: &Rc<Worker>, top: usize) -> Vec<u8> {
+    let body = stats::origins_json(me, top).await;
+    http::response("200 OK", Some("application/json"), body.as_bytes())
 }
 
 async fn swarms_response(me: &Rc<Worker>, top: usize) -> Vec<u8> {

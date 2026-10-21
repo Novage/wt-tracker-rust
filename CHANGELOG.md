@@ -69,6 +69,10 @@ All notable changes to this project are listed here. The format follows
 - `monitoring/`: a Grafana dashboard and alert rules built on `/metrics` alone, with a setup
   guide for Grafana Cloud's free tier or Prometheus.
 
+- `/origins` on the metrics listener: open connections per website (`Origin` header) over all
+  workers, most first, with how many of them announced, to see which sites use the tracker
+  before blocking any with `websocketsAccess`.
+
 ### Changed
 
 - `"event":"paused"` (BEP 21 partial seed, sent by libtorrent and Transmission on every announce

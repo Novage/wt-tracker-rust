@@ -404,3 +404,145 @@ async fn metrics_listener_https_reloads_and_serves_the_monitoring_kit() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `/origins` of the metrics listener as JSON.
+async fn origins(server: &wt_server::Server, query: &str) -> serde_json::Value {
+    let (status, body) =
+        http_get(server.metrics_addr().unwrap(), &format!("/origins{query}")).await;
+    assert_eq!(status, "HTTP/1.1 200 OK", "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+/// `(origin, connections, announced)` of every listed origin.
+fn origin_rows(v: &serde_json::Value) -> Vec<(String, u64, u64)> {
+    v["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| {
+            (
+                o["origin"].as_str().unwrap().to_string(),
+                o["connections"].as_u64().unwrap(),
+                o["announced"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Polls `/origins` until its rows are `want` (a connection registers just after its upgrade).
+async fn wait_origins(server: &wt_server::Server, want: &[(&str, u64, u64)]) -> serde_json::Value {
+    let want: Vec<(String, u64, u64)> = want
+        .iter()
+        .map(|(o, c, a)| (o.to_string(), *c, *a))
+        .collect();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let v = origins(server, "?top=0").await;
+        if origin_rows(&v) == want {
+            return v;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{v} != {want:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Spec §13.7: `/origins` counts the open connections per `Origin` (and how many announced),
+/// most first, over all workers; `""` is no `Origin`; a too long value is `"(too long)"`.
+#[tokio::test(flavor = "multi_thread")]
+async fn origins_count_connections_per_origin() {
+    let server = plain(2);
+    let mut keep = Vec::new();
+    for i in 0..3 {
+        let mut ws = connect_with_origin(&server, Some("https://a.example"))
+            .await
+            .unwrap();
+        if i < 2 {
+            send(
+                &mut ws,
+                &announce(&format!("horigin{i:013}"), &format!("pa{i}"), 0),
+            )
+            .await;
+            recv(&mut ws).await.unwrap();
+        }
+        keep.push(ws);
+    }
+    keep.push(
+        connect_with_origin(&server, Some("https://b.example"))
+            .await
+            .unwrap(),
+    );
+    keep.push(connect_with_origin(&server, None).await.unwrap());
+    let long = format!("https://{}.example", "a".repeat(300));
+    keep.push(connect_with_origin(&server, Some(&long)).await.unwrap());
+
+    let v = wait_origins(
+        &server,
+        &[
+            ("https://a.example", 3, 2),
+            ("", 1, 0),
+            ("(too long)", 1, 0),
+            ("https://b.example", 1, 0),
+        ],
+    )
+    .await;
+    assert_eq!(
+        (v["total"].as_u64(), v["connections"].as_u64()),
+        (Some(4), Some(6)),
+        "{v}"
+    );
+
+    let top = origins(&server, "?top=1").await;
+    assert_eq!(origin_rows(&top), [("https://a.example".to_string(), 3, 2)]);
+    assert_eq!(top["total"], 4);
+    assert_eq!(
+        http_get(server.metrics_addr().unwrap(), "/origins?top=x")
+            .await
+            .0,
+        "HTTP/1.1 400 Bad Request"
+    );
+    // Not on the public listener.
+    assert_eq!(
+        http_get(server.local_addrs()[0], "/origins").await.0,
+        "HTTP/1.1 404 Not Found"
+    );
+
+    // Closed connections are no longer counted.
+    drop(keep);
+    wait_origins(&server, &[]).await;
+}
+
+/// A connection that moves to another worker at its first announce (`content` placement) is
+/// counted once, on the worker that holds it.
+#[tokio::test(flavor = "multi_thread")]
+async fn origins_count_a_moved_connection_once() {
+    let server = start(r#"{"servers":[{"server":{"host":"127.0.0.1","port":0}}],"workers":4}"#);
+    let mut keep = Vec::new();
+    for i in 0..40 {
+        let mut ws = connect_with_origin(&server, Some("https://m.example"))
+            .await
+            .unwrap();
+        send(
+            &mut ws,
+            &announce(&format!("hmoved{i:014}"), &format!("pm{i}"), 0),
+        )
+        .await;
+        recv(&mut ws).await.unwrap();
+        keep.push(ws);
+        if i >= 8
+            && metrics(&server)
+                .await
+                .sum("wt_moved_connections_total", &[])
+                > 0
+        {
+            break;
+        }
+    }
+    assert!(
+        metrics(&server)
+            .await
+            .sum("wt_moved_connections_total", &[])
+            > 0
+    );
+    let n = keep.len() as u64;
+    wait_origins(&server, &[("https://m.example", n, n)]).await;
+}

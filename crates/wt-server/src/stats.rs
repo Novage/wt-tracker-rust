@@ -1,5 +1,8 @@
 //! `/stats.json`: a small summary, or one swarm with `?infoHash=<hex>` (spec §13.5); the
-//! largest swarms for `/swarms` on the private listener (spec §13.7).
+//! largest swarms for `/swarms` and the connections per origin for `/origins` on the metrics
+//! listener (spec §13.7).
+
+use std::collections::HashMap;
 
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
@@ -7,7 +10,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use serde_json::{Value, json};
 
 use crate::http;
-use crate::worker::Worker;
+use crate::worker::{OriginCounts, Worker};
 
 /// The `/stats.json` response for a request's query string: the summary, or one swarm with
 /// `infoHash` (`400` if it is not hex). Public and metrics listeners alike.
@@ -94,6 +97,43 @@ pub(crate) async fn swarms_json(me: &Rc<Worker>, top: usize) -> String {
     json!({ "swarms": swarms, "total": total }).to_string()
 }
 
+/// Open connections per origin of all workers, most first (ties by origin): `{"origins":
+/// [{"origin", "connections", "announced"}], "total", "connections"}`, at most `top` of them (0:
+/// all). `total`: distinct origins; `connections`: all open connections counted.
+pub(crate) async fn origins_json(me: &Rc<Worker>, top: usize) -> String {
+    let (origins, total, connections) = merge_origins(me.origins().await, top);
+    let origins: Vec<Value> = origins
+        .into_iter()
+        .map(|(origin, connections, announced)| {
+            json!({ "origin": origin, "connections": connections, "announced": announced })
+        })
+        .collect();
+    json!({ "origins": origins, "total": total, "connections": connections }).to_string()
+}
+
+/// `(origin, connections, announced)` most first, distinct origins, all connections.
+type MergedOrigins = (Vec<(Box<str>, u64, u64)>, usize, u64);
+
+/// Sums the workers' counts per origin and sorts them; returns the first `top` (0: all), the
+/// number of distinct origins and the sum of all connections.
+fn merge_origins(per_worker: Vec<OriginCounts>, top: usize) -> MergedOrigins {
+    let mut merged: HashMap<Box<str>, (u64, u64)> = HashMap::new();
+    for (origin, connections, announced) in per_worker.into_iter().flatten() {
+        let m = merged.entry(origin).or_default();
+        m.0 += u64::from(connections);
+        m.1 += u64::from(announced);
+    }
+    let total = merged.len();
+    let connections = merged.values().map(|m| m.0).sum();
+    let mut origins: Vec<(Box<str>, u64, u64)> =
+        merged.into_iter().map(|(o, (c, a))| (o, c, a)).collect();
+    origins.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    if top > 0 {
+        origins.truncate(top);
+    }
+    (origins, total, connections)
+}
+
 /// Hex of an info_hash key, the inverse of [`info_hash_from_hex`]: the key is the UTF-8 of a
 /// "binary" string, one byte per character (its low 8 bits, like JS
 /// `Buffer.from(s, "binary").toString("hex")`).
@@ -168,6 +208,25 @@ mod tests {
         for hex in ["4142", "00ff80", "68736f6d65"] {
             assert_eq!(binary_hex(&info_hash_from_hex(hex).unwrap()), hex);
         }
+    }
+
+    #[test]
+    fn origins_merge_across_workers_most_first() {
+        let w0: OriginCounts = vec![("https://a".into(), 3, 2), ("".into(), 1, 0)];
+        let w1: OriginCounts = vec![("https://a".into(), 1, 1), ("https://b".into(), 4, 4)];
+        let (all, total, connections) = merge_origins(vec![w0.clone(), w1.clone()], 0);
+        assert_eq!(
+            all,
+            vec![
+                ("https://a".into(), 4, 3),
+                ("https://b".into(), 4, 4),
+                ("".into(), 1, 0)
+            ]
+        );
+        assert_eq!((total, connections), (3, 9));
+        let (top, total, _) = merge_origins(vec![w0, w1], 1);
+        assert_eq!((top.len(), total), (1, 3));
+        assert_eq!(merge_origins(Vec::new(), 10), (Vec::new(), 0, 0));
     }
 
     #[test]
