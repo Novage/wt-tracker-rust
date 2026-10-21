@@ -19,7 +19,7 @@ A multi-core [WebTorrent](https://webtorrent.io/) tracker in Rust: a port of
   per worker thread, as uWebSockets does. TLS (rustls) works on the same buffers, and
   permessage-deflate is negotiated like the JS tracker's default. It passes all 517 cases of the
   Autobahn testsuite over ws and wss.
-- **Low memory:** 5–8 KiB per connection under load (about 9 KiB with TLS), against 19–34 KiB
+- **Low memory:** 6–7 KiB per connection under load (about 12 KiB with TLS), against 27–37 KiB
   for the JS tracker.
 
 **Status:** in production since October 2026 at `wss://tracker.novage.com.ua` (Oracle Cloud
@@ -34,11 +34,11 @@ announce, every offer answered (`loadtest/run.sh`; full table in
 
 | Profile | Server | CPU µs / message | KiB / connection | RTT p50 |
 |---|---|---:|---:|---:|
-| 3000 connections, announce every 5 s | JS tracker | 17.0 | 27.1 | 0.47 ms |
-| | Rust, 1 worker | **10.8** | **5.6** | **0.23 ms** |
-| 4000 connections, 128k messages/s | JS tracker | 5.3 | 19.1 | 0.51 ms |
-| | Rust, 1 worker | **4.3** | **6.7** | **0.32 ms** |
-| | Rust, all cores | 5.4 | 7.3 | 0.30 ms |
+| 3000 connections, announce every 5 s | JS tracker | 17.3 | 36.1 | 0.46 ms |
+| | Rust, 1 worker | **12.2** | **5.7** | **0.25 ms** |
+| 4000 connections, 128k messages/s | JS tracker | 5.3 | 26.9 | 0.53 ms |
+| | Rust, 1 worker | **3.8** | **6.6** | **0.29 ms** |
+| | Rust, all cores | 4.8 | 7.2 | 0.30 ms |
 
 **In production** at `wss://tracker.novage.com.ua` (Oracle Ampere A1, 2 cores, real
 p2p-media-loader peers, ~42k connections): 0.35 cores and 590 MiB, against 1.46 cores and 1.9 GiB
