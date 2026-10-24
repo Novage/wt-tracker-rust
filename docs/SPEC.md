@@ -483,7 +483,9 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   counts the received and sent messages and bytes, the deflated and inflated bytes and
   socket bytes (a connection moved at its first message is counted once).
   `wt-proto/tests/encode.rs`: `Encoder::counters` per kind, kept across `clear` / `take`.
-- `tests/shutdown.rs`: a graceful shutdown closes every connection with 1001 and returns once
+- `tests/shutdown.rs` (its tests run one at a time, through a static `tokio::sync::Mutex`: each
+  binds `127.0.0.1:0`, and a port freed by one test's shutdown could go to another test's new
+  listener): a graceful shutdown closes every connection with 1001 and returns once
   they are closed, then nothing accepts on its port (a connect fails, or is a TCP self-connect:
   the freed port can become the client's own source port); a zero timeout returns at once with a client that
   never answers; the `wt-tracker` binary (Unix) closes with 1001, logs `event=stopped` and exits

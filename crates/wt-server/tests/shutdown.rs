@@ -12,6 +12,11 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 const H: &str = "hshutdown00000000001";
 
+/// The tests of this file run one at a time. Each binds `127.0.0.1:0` (in this process or in a
+/// child `wt-tracker`), and a port freed by one test's shutdown can go to another test's new
+/// listener, which `assert_listener_closed` would then see accept (CI, 2026-10-24).
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The close code the server sends next (skipping other messages).
 async fn close_code(ws: &mut Ws) -> Option<CloseCode> {
     loop {
@@ -25,6 +30,7 @@ async fn close_code(ws: &mut Ws) -> Option<CloseCode> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn graceful_shutdown_closes_every_connection_with_going_away() {
+    let _serial = SERIAL.lock().await;
     let server = plain(4);
     let addr = server.local_addrs()[0];
     let mut clients = Vec::new();
@@ -65,6 +71,7 @@ async fn assert_listener_closed(addr: std::net::SocketAddr) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_zero_timeout_stops_without_waiting() {
+    let _serial = SERIAL.lock().await;
     let server = plain(2);
     // A client that never reads or answers the close.
     let raw = Raw::connect(&server, &frame(true, 1, announce(H, "p", 0).as_bytes())).await;
@@ -110,6 +117,7 @@ fn kill(signal: &str, pid: u32) {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn sigterm_shuts_the_binary_down_gracefully() {
+    let _serial = SERIAL.lock().await;
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
@@ -175,6 +183,7 @@ async fn sigterm_shuts_the_binary_down_gracefully() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn sighup_reloads_the_certificate_and_keeps_running() {
+    let _serial = SERIAL.lock().await;
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
@@ -281,6 +290,7 @@ async fn sighup_reloads_the_certificate_and_keeps_running() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn sighup_during_startup_does_not_kill_the_process() {
+    let _serial = SERIAL.lock().await;
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
 
