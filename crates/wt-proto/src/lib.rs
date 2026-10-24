@@ -164,15 +164,13 @@ pub fn apply(
         )?,
         // An id that cannot match anything: nothing to stop (same as JS).
         Message::Stop { .. } => {}
-        Message::Scrape { info_hashes } => {
-            let slices: SmallVec<[&[u8]; 4]>;
-            let target = match info_hashes {
-                None => ScrapeTarget::All,
-                Some(hashes) => {
-                    slices = hashes.iter().map(|h| h.as_ref()).collect();
-                    ScrapeTarget::Many(&slices)
-                }
-            };
+        // Scrape of all swarms: no reply (as aquatic_ws; JS replies, spec §8).
+        Message::Scrape { info_hashes: None } => {}
+        Message::Scrape {
+            info_hashes: Some(hashes),
+        } => {
+            let slices: SmallVec<[&[u8]; 4]> = hashes.iter().map(|h| h.as_ref()).collect();
+            let target = ScrapeTarget::Many(&slices);
             shard.handle(now, conn, Request::Scrape::<Payload<'_>> { target }, out)?;
         }
     }

@@ -182,7 +182,7 @@ async fn a_connection_whose_first_message_is_not_an_announce_stays_and_forwards(
     let server = plain(WORKERS);
     const H: &str = "hpinned0000000000001";
     let mut owner = connect(&server).await;
-    send(&mut owner, r#"{"action":"scrape"}"#).await;
+    send(&mut owner, r#"{"action":"scrape","info_hash":"x"}"#).await;
     recv(&mut owner).await.unwrap();
     send(&mut owner, &announce(H, "po", 0)).await;
     assert_eq!(recv(&mut owner).await.unwrap(), reply(H, 0, 1));

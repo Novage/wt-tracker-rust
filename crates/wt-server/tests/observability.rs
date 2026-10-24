@@ -144,7 +144,7 @@ async fn undeliverable_answers_are_dropped_and_malformed_ones_rejected() {
     wait_metric(&server, "wt_dropped_answers_total", &[], 12).await;
     // Still connected: a scrape is answered.
     for ws in &mut clients {
-        send(ws, r#"{"action":"scrape"}"#).await;
+        send(ws, r#"{"action":"scrape","info_hash":"x"}"#).await;
         assert!(recv(ws).await.unwrap().starts_with(r#"{"action":"scrape""#));
     }
     let m = metrics(&server).await;

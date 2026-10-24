@@ -13,7 +13,8 @@
 // Offer receivers are random on both sides and swarm order may legitimately differ, so offer
 // messages are compared as a multiset of texts and each receiver is checked to be a valid
 // other member. Frames marked non-canonical (extra whitespace, escapes JSON.stringify would not
-// produce, duplicate keys) and scrape-all replies are compared after JSON.parse.
+// produce, duplicate keys) are compared after JSON.parse. A scrape without info_hash is not
+// generated: JS replies with every swarm, Rust ignores it (spec §8).
 //
 // Usage: node difftest/run.ts [traces=200] [ops=500] [first-seed=1]
 //   WT_TRACKER_DIR=<path to wt-tracker> (default ../wt-tracker)
@@ -177,10 +178,8 @@ function generateTrace(seed: number, opsCount: number): { seed: number; ops: Op[
       const info_hash = weighted<string>([[85, json(pick(hashes))], [10, '"nope"'], [5, "5"]]);
       push(home.get(peer)!, shuffle([["action", '"announce"'], ["event", '"stopped"'], ["info_hash", info_hash], ["peer_id", json(peer)]]), { kind: "stop" });
     } else if (kind === "scrape") {
-      const info_hash = weighted<unknown>([[30, undefined], [35, chance(0.8) ? pick(hashes) : "nope"], [25, [pick(hashes), 5, pick(hashes), "nope", null]], [10, 5]]);
-      const members: [string, string][] = [["action", '"scrape"']];
-      if (info_hash !== undefined) members.push(["info_hash", json(info_hash)]);
-      push(int(conns), members, { kind: "scrape", info_hash });
+      const info_hash = weighted<unknown>([[50, chance(0.8) ? pick(hashes) : "nope"], [35, [pick(hashes), 5, pick(hashes), "nope", null]], [15, 5]]);
+      push(int(conns), [["action", '"scrape"'], ["info_hash", json(info_hash)]], { kind: "scrape", info_hash });
     } else if (kind === "error") {
       // Rejected by both sides before any state change ("zz" is a fresh peer_id).
       const frame = pick([
@@ -399,7 +398,7 @@ function specCheck(op: Op, r: Result, prev: State, side: string): string | undef
         return { complete: c, incomplete: (sw?.peers.length ?? 0) - c, downloaded: c };
       };
       const ih = sem.info_hash;
-      const hashes = ih === undefined ? Object.keys(s.swarms) : typeof ih === "string" ? [ih] : Array.isArray(ih) ? (ih.filter((h) => typeof h === "string") as string[]) : [];
+      const hashes = typeof ih === "string" ? [ih] : Array.isArray(ih) ? (ih.filter((h) => typeof h === "string") as string[]) : [];
       const expected = canonicalText(json({ action: "scrape", files: Object.fromEntries(hashes.map((h) => [h, entry(h)])) }));
       if (scrapes.length !== 1 || scrapes[0][0] !== op.conn || canonicalText(scrapes[0][1]) !== expected) return fail(`scrape ${json(scrapes)}, expected ${expected}`);
       return only("scrape");
@@ -407,13 +406,12 @@ function specCheck(op: Op, r: Result, prev: State, side: string): string | undef
   }
 }
 
-/** Same bytes (or same JSON for non-canonical frames / scrape-all) on both sides. */
+/** Same bytes (or same JSON for non-canonical frames) on both sides. */
 function compare(op: Op, js: Result, rust: Result): string | undefined {
   if (js.error !== rust.error) return `error: js ${js.error}, rust ${rust.error}`;
   if (cmp(sorted(js.removed), sorted(rust.removed)) !== 0) return `removed: js ${json(js.removed)}, rust ${json(rust.removed)}`;
   if (cmp(canonicalState(js.state), canonicalState(rust.state)) !== 0) return `state: js ${json(canonicalState(js.state))}, rust ${json(canonicalState(rust.state))}`;
-  const exact = !op.noncanonical && !(op.sem?.kind === "scrape" && op.sem.info_hash === undefined);
-  const norm = (t: string) => (exact ? t : canonicalText(t));
+  const norm = (t: string) => (op.noncanonical ? canonicalText(t) : t);
   const key = (r: Result) =>
     sorted(r.messages.map(([to, t]) => (kindOf(t) === "offer" ? [-1, norm(t)] : [to, norm(t)])));
   const [a, b] = [key(js), key(rust)];

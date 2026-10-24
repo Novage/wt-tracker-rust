@@ -249,13 +249,8 @@ fn scrape_files() {
         &[join, (9, r#"{"action":"scrape","info_hash":5}"#)],
         &[(9, r#"{"action":"scrape","files":{}}"#)],
     );
-    check(
-        &[join, (9, r#"{"action":"scrape"}"#)],
-        &[(
-            9,
-            r#"{"action":"scrape","files":{"h1":{"complete":1,"incomplete":0,"downloaded":1}}}"#,
-        )],
-    );
+    // Scrape of all swarms: no reply (spec §8).
+    check(&[join, (9, r#"{"action":"scrape"}"#)], &[]);
 }
 
 #[test]
@@ -270,7 +265,7 @@ fn stop_with_unmatchable_ids_is_a_no_op() {
                 1,
                 r#"{"action":"announce","event":"stopped","info_hash":5,"peer_id":"p1"}"#,
             ),
-            (9, r#"{"action":"scrape"}"#),
+            (9, r#"{"action":"scrape","info_hash":"h1"}"#),
         ],
         &[(
             9,

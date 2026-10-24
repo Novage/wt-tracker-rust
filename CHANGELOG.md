@@ -102,6 +102,10 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
+- One message without `info_hash` (`{"action":"scrape"}`) made a worker stop for seconds and,
+  after it, grow its memory by gigabytes (production: 3.2 → 6.9 GiB on 2026-10-24). A scrape
+  without `info_hash` now gets no reply (as aquatic_ws; the JS tracker replies with every swarm),
+  and the encoder no longer keeps the capacity of one large batch for every later batch.
 - A worker could hang at 100% CPU, stalling its connections until an out-of-memory kill: a
   client whose first TLS record was larger than 8 KiB and arrived in parts left the HTTP head
   reader looping on a readable socket it did not read, without ever yielding. Production

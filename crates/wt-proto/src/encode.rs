@@ -93,6 +93,9 @@ enum Kind {
     Scrape,
 }
 
+/// Largest buffer capacity [`Encoder::take`] carries over to the next batch.
+const KEEP_CAPACITY: usize = 64 * 1024;
+
 /// Collects outgoing messages into one reusable buffer. Call [`Encoder::clear`] after the
 /// messages were sent; buffers keep their capacity, so steady state does not allocate.
 #[derive(Default)]
@@ -143,9 +146,11 @@ impl Encoder {
     }
 
     /// Moves the messages out as one shared buffer (no copy of message bytes) and clears the
-    /// encoder. Costs one buffer allocation per batch instead of one per message.
+    /// encoder. Costs one buffer allocation per batch instead of one per message. The next
+    /// buffer keeps at most 64 KiB of capacity: a batch stays allocated while any of its
+    /// messages waits in a queue, so one large batch must not make every later one large.
     pub fn take(&mut self) -> Batch {
-        let capacity = self.buf.capacity();
+        let capacity = self.buf.capacity().min(KEEP_CAPACITY);
         let buf = std::mem::replace(&mut self.buf, Vec::with_capacity(capacity));
         let messages = std::mem::take(&mut self.messages);
         self.clear();
@@ -293,5 +298,18 @@ impl<'a> Outbox<Payload<'a>> for Encoder {
 
     fn peer_removed(&mut self, peer_id: &Key, conn: ConnId) {
         self.removed.push((*peer_id, conn));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_large_batch_does_not_make_the_next_buffer_large() {
+        let mut encoder = Encoder::new();
+        encoder.buf.resize(4 << 20, b' ');
+        let _ = encoder.take();
+        assert_eq!(encoder.buf.capacity(), KEEP_CAPACITY);
     }
 }

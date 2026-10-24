@@ -16,8 +16,6 @@ pub enum AnnounceEvent {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ScrapeTarget<'a> {
-    /// No `info_hash` field: scrape every swarm.
-    All,
     One(&'a [u8]),
     Many(&'a [&'a [u8]]),
 }

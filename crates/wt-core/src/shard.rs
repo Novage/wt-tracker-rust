@@ -409,18 +409,6 @@ impl Shard {
 
     fn scrape<O>(&self, conn: ConnId, target: ScrapeTarget<'_>, out: &mut impl Outbox<O>) {
         match target {
-            ScrapeTarget::All => {
-                for (_, s) in &self.swarms {
-                    let incomplete = s.slots.len() as u32 - s.completed;
-                    out.scrape_entry(
-                        conn,
-                        s.info_hash.as_bytes(),
-                        s.completed,
-                        incomplete,
-                        s.completed,
-                    );
-                }
-            }
             ScrapeTarget::One(info_hash) => self.scrape_one(conn, info_hash, out),
             ScrapeTarget::Many(info_hashes) => {
                 for info_hash in info_hashes {

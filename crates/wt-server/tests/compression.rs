@@ -329,7 +329,7 @@ async fn a_moved_connection_keeps_compression() {
     let mut crowd = Vec::new();
     for _ in 0..8 {
         let mut ws = connect(&server).await;
-        send(&mut ws, r#"{"action":"scrape"}"#).await;
+        send(&mut ws, r#"{"action":"scrape","info_hash":"x"}"#).await;
         recv(&mut ws).await.unwrap();
         crowd.push(ws);
     }

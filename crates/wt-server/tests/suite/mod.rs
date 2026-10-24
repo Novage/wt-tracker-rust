@@ -1,6 +1,5 @@
 //! In-process server tests over real sockets (spec §13).
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::common::*;
@@ -116,26 +115,8 @@ async fn scrape_merges_shards_in_request_order() {
         )
     );
 
+    // Scrape of all swarms: no reply, so the next message answers the next scrape (spec §8).
     send(&mut ws, r#"{"action":"scrape"}"#).await;
-    let all: serde_json::Value = serde_json::from_str(&recv(&mut ws).await.unwrap()).unwrap();
-    let files: BTreeMap<String, u64> = all["files"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(h, f)| {
-            (
-                h.clone(),
-                f["incomplete"].as_u64().unwrap() + f["complete"].as_u64().unwrap(),
-            )
-        })
-        .collect();
-    let expected: BTreeMap<String, u64> = H[..6]
-        .iter()
-        .enumerate()
-        .map(|(i, h)| (h.to_string(), i as u64 + 1))
-        .collect();
-    assert_eq!(files, expected);
-
     send(
         &mut ws,
         &format!(r#"{{"action":"scrape","info_hash":"{}"}}"#, H[2]),
@@ -461,7 +442,7 @@ async fn backpressure_drops_messages_for_a_client_that_does_not_read() {
     }
     assert!(metrics(&server).await.sum("wt_dropped_messages_total", &[]) > 0);
     // The server and the busy peer are fine.
-    send(&mut busy, r#"{"action":"scrape"}"#).await;
+    send(&mut busy, r#"{"action":"scrape","info_hash":"x"}"#).await;
     assert!(
         recv(&mut busy)
             .await

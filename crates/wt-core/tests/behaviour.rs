@@ -555,10 +555,6 @@ fn scrape_all_one_and_many() {
     };
     let end = Event::ScrapeEnd { to: ConnId(9) };
 
-    let mut all = scrape(ScrapeTarget::All);
-    all.sort_by_key(|e| format!("{e:?}"));
-    assert_eq!(all, [end.clone(), entry(b"X", 1, 1), entry(b"Y", 0, 1)]);
-
     assert_eq!(
         scrape(ScrapeTarget::One(b"X")),
         [entry(b"X", 1, 1), end.clone()]

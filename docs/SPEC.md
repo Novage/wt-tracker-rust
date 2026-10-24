@@ -166,8 +166,9 @@ a late stop from a connection the peer_id left is ignored too; §8).
 
 ### 5.5 Scrape (`Request::Scrape { target }`)
 
-`All` covers every swarm. `One(h)` and `Many([h…])` produce one entry per requested hash, in
-order, with zeros for unknown hashes. Each entry is `scrape_entry(conn, info_hash, complete,
+`One(h)` and `Many([h…])` produce one entry per requested hash, in order, with zeros for
+unknown hashes. There is no scrape of all swarms (a scrape without `info_hash` gets no reply,
+§7.1, §8). Each entry is `scrape_entry(conn, info_hash, complete,
 incomplete, downloaded = complete)`, and the reply always ends with `scrape_end(conn)`, even when
 it is empty.
 
@@ -240,7 +241,7 @@ ignored but still validated (answers forward them).
 | answer body | the frame with the `to_peer_id` member (and one adjacent comma) cut out: `Payload::Answer { head, tail }`, two slices, no copy | |
 | stop `peer_id` | must be a string | `BadField` |
 | stop ids that cannot match (non-string `info_hash`, > 40 bytes, lone surrogate) | no-op | `Ok` |
-| scrape `info_hash` | absent → all swarms; string → that one; array → its string elements in order (others skipped); any other value → none (`"files":{}`) | `Scrape` |
+| scrape `info_hash` | absent → ignored: no reply, no error, the connection stays open (§8); string → that one; array → its string elements in order (others skipped); any other value → none (`"files":{}`) | `Scrape` |
 
 ### 7.2 Outgoing messages
 
@@ -251,7 +252,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | announce reply | `{"action":"announce","interval":N,"info_hash":S,"complete":N,"incomplete":N}` |
 | offer | `{"action":"announce","info_hash":S,"offer_id":RAW,"peer_id":S,"offer":{"type":"offer","sdp":RAW}}`; `offer_id` / `sdp` omitted when absent; other offer fields dropped |
 | answer | `head` + `tail`: the received answer without `to_peer_id`, all other members in order |
-| scrape | `{"action":"scrape","files":{S:{"complete":N,"incomplete":N,"downloaded":N},…}}`; a repeated hash keeps its first entry; order for "all swarms" is unspecified |
+| scrape | `{"action":"scrape","files":{S:{"complete":N,"incomplete":N,"downloaded":N},…}}`; a repeated hash keeps its first entry |
 
 - `S` (ids, hashes) is written like `JSON.stringify`: `"` and `\` escaped, `\b \t \n \f \r`, other
   characters below 0x20 as `\u00xx` (lowercase), everything else raw UTF-8.
@@ -286,7 +287,10 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   frame plus offsets); `.message()` gives it back.
 - `Encoder`: one byte buffer plus a message index. `messages()` yields `(ConnId, &[u8])` in emission
   order, `removed()` the `peer_removed` events, `bytes()` the total size; `clear()` keeps capacity;
-  `take()` moves all messages out as a `Batch` (one `Bytes` buffer, each message a slice of it).
+  `take()` moves all messages out as a `Batch` (one `Bytes` buffer, each message a slice of it);
+  the next buffer gets the old capacity, at most 64 KiB (`KEEP_CAPACITY`): a batch stays
+  allocated while any of its messages waits in a connection queue, so one large batch must not
+  make every later batch allocate as much.
   Integers via `itoa`. `counters()`: messages and JSON bytes produced since the encoder was
   created, per kind (`announce_replies`, `offers`, `answers`, `scrapes`; `Count { messages,
   bytes }`), not reset by `clear()` / `take()`.
@@ -300,6 +304,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 | Time | `performance.now()` ms, internal `setInterval` sweep | caller passes `now` seconds and calls `expire` | sans-IO, deterministic |
 | Malformed `offers` | error only when an offer is actually sent (swarm > 1, integer `numwant`), after the reply and possibly some offers went out | `BadField("offers")` before anything happens, whenever offers are malformed | all-or-nothing; affects only malformed clients |
 | Scrape with repeated hashes | one entry (object keys) | core reports each; the encoder keeps the first | same on the wire |
+| Scrape without `info_hash` | reply with every swarm | ignored: no reply, no error (as aquatic_ws) | the reply was larger than `maxBackpressure` (1 MiB) in production and dropped anyway; building it stopped a worker for seconds and lists every info_hash to anyone; clients always send `info_hash` |
 | Raw `sdp` / `offer_id` / answer body | re-serialized canonically | forwarded verbatim | zero-copy; byte-identical for canonical input, semantically equal otherwise |
 | Invalid UTF-8 | replaced with U+FFFD | `InvalidJson` | text frames must be UTF-8 |
 | Lone surrogate (`\ud800`) | accepted | `SerdeJson`: `BadField` in ids, forwarded verbatim elsewhere; `Sonic`: `InvalidJson` anywhere | no UTF-8 encoding exists |
@@ -391,7 +396,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   `numwant` form of §7.1, 0–12 offers (`offer_id` string / number / `null` / absent, `sdp` with
   CRLF, quotes, backslashes, U+2028, emoji, control characters, absent; array `offer`; extra
   members), answers (`answer` object / `null` / number, extra members, any member order,
-  unknown targets, without `info_hash`, ~10% from another connection than the sender's), stops, scrapes (all / one / array with non-strings / number), error frames
+  unknown targets, without `info_hash`, ~10% from another connection than the sender's), stops, scrapes (one / array with non-strings / number; not without `info_hash`, a §8
+  difference), error frames
   that both sides reject without a state change (an unknown event is `"update"`; `"paused"` is a
   §8 difference and not generated), disconnects, clock advances and expiry, with
   shuffled member order and ~6% non-canonical frames (whitespace, escaped spellings, duplicate
@@ -405,7 +411,7 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   - **equality JS ↔ Rust**: error flag, removed peers (as a set), full state (swarm → sorted
     peer_ids + completed count; peer_id → connection), and **sent bytes**: every non-offer
     message per connection and every offer message as a multiset of texts, byte for byte
-    (compared after `JSON.parse` for non-canonical frames and scrape-all);
+    (compared after `JSON.parse` for non-canonical frames);
   - **the spec, on each side independently**: §5.1 reply; §5.2 offer count
     `n = min(others, offers, max_offers, numwant)` with exactly the first `n` payloads, receivers
     a sub-multiset of the other members' connections (all of them when `n == others`); §5.3 /
@@ -529,7 +535,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
   process's files). The test
   helper `start()` adds a metrics listener on 127.0.0.1 (any port) unless the config has
   `metrics`. `wt-proto/tests/owned.rs`:
-  `OwnedMessage` round trip (also across threads) and `Encoder::take`.
+  `OwnedMessage` round trip (also across threads) and `Encoder::take`; a unit test in
+  `encode.rs`: after a 4 MiB batch the next buffer has 64 KiB of capacity.
 
   Offer receivers are not compared exactly: both sides choose them randomly, and the swarm order
   may legitimately differ after multi-peer removals (disconnect, expiry). The deliberate
@@ -799,6 +806,13 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   overflows (Linux). `monitoring/` has a Grafana dashboard, alert rules and a setup guide built
   on `/metrics` alone. `/origins` lists the open connections per website (`Origin`), to see
   which sites use the tracker. Open: publish the dashboard on grafana.com.
+- **Scrape-all memory spike (done, §7.1, §7.3, §8):** in production (2026-10-24 02:28 UTC) one
+  `{"action":"scrape"}` made worker 0 build a 2.88 MB reply (dropped by `maxBackpressure`),
+  checking each key against all earlier ones, and RSS rose from 3.2 to 6.9 GiB for a minute:
+  after the scrape every batch buffer had its capacity, and batches stay allocated while their
+  messages wait in queues. A scrape without `info_hash` is now ignored, and `Encoder::take`
+  carries at most 64 KiB of capacity over. Probably also the 6.8 GiB spike at the 2026-10-21
+  shutdown (a scrape-all came at 04:42 that day).
 
 ## 13. Server (`crates/wt-server`, binary `wt-tracker`)
 
@@ -968,7 +982,7 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
     + offsets, no re-parse);
   - a stop whose ids cannot match → nothing; an answer whose `info_hash` cannot be a key → the
     local shard, which drops it (§5.3);
-  - scrape of all / several hashes → gathered (§13.4).
+  - scrape of several hashes → gathered (§13.4); without `info_hash` → nothing (§8).
 - The owning shard's output is encoded once per batch (`Encoder::take`): each message is a slice
   of one buffer, delivered to its connection's queue (local) or batched per destination worker
   (one channel send per destination per scheduler tick).
@@ -981,9 +995,9 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
 
 ### 13.4 Scrape and stats across shards
 
-Scrape of all swarms or of several hashes is scattered to the shards owning them and gathered
-(`content`: hashes not in the directory are asked nowhere and reported 0 / 0); entries are
-encoded in request order with the first occurrence kept (§7.2), all swarms in shard order.
+Scrape of several hashes is scattered to the shards owning them and gathered (`content`: hashes
+not in the directory are asked nowhere and reported 0 / 0); entries are encoded in request order
+with the first occurrence kept (§7.2). A scrape without `info_hash` is not routed (no reply, §8).
 `/stats.json` and `/metrics` gather counts (swarms, summed peers) and counters of every worker
 through its inbox (`Event::Stats`; `?infoHash=`: `Event::Swarm`, one swarm's peers), waiting at
 most 1 s for each: a worker that does not answer is reported as down (`wt_worker_up 0`, its counts

@@ -40,9 +40,9 @@ pub(crate) enum Event {
     Deliver { conn: ConnId, message: Bytes },
     /// This shard rejected a request of the connection: close it (like the JS server).
     Close { conn: ConnId },
-    /// Scrape this shard (`None`: all swarms).
+    /// Scrape these hashes of this shard.
     Scrape {
-        info_hashes: Option<Vec<Vec<u8>>>,
+        info_hashes: Vec<Vec<u8>>,
         reply: oneshot::Sender<Vec<ScrapeEntry>>,
     },
     /// Counts and counters of this shard, for `/stats.json` and `/metrics`.
@@ -140,7 +140,7 @@ pub(crate) enum Out {
 }
 
 /// A scrape spanning shards, gathered asynchronously.
-type ScrapeJob = Option<Vec<Vec<u8>>>;
+type ScrapeJob = Vec<Vec<u8>>;
 
 enum Routed {
     Done,
@@ -562,17 +562,15 @@ impl Worker {
 
         if let Message::Scrape { info_hashes } = message {
             return match info_hashes {
+                // Scrape of all swarms: no reply (spec §8).
+                None => Ok(Routed::Done),
                 Some(hashes) if hashes.len() == 1 && workers > 1 => {
                     let shard = self.owner(&hashes[0]).unwrap_or(self.id);
                     self.route(shard, conn, frame, message)
                         .map(|_| Routed::Done)
                 }
                 _ if workers == 1 => self.apply_local(conn, message).map(|_| Routed::Done),
-                _ => Ok(Routed::Scrape(
-                    info_hashes
-                        .as_ref()
-                        .map(|hashes| hashes.iter().map(|h| h.to_vec()).collect()),
-                )),
+                Some(hashes) => Ok(Routed::Scrape(hashes.iter().map(|h| h.to_vec()).collect())),
             };
         }
 
@@ -707,7 +705,7 @@ impl Worker {
                         }
                         Event::Close { conn } => rejected.push(conn),
                         Event::Scrape { info_hashes, reply } => {
-                            let _ = reply.send(scrape_entries(&shard, info_hashes.as_deref()));
+                            let _ = reply.send(scrape_entries(&shard, &info_hashes));
                         }
                         Event::Stats { reply } => {
                             let _ = reply.send(self.shard_stats(&shard, encoder.counters()));
@@ -737,23 +735,21 @@ impl Worker {
     }
 
     /// Scrape across shards, merged in request order (spec §13.4).
-    async fn scrape(self: &Rc<Self>, conn: ConnId, info_hashes: Option<Vec<Vec<u8>>>) {
+    async fn scrape(self: &Rc<Self>, conn: ConnId, info_hashes: Vec<Vec<u8>>) {
         let mut entries: Vec<ScrapeEntry> = Vec::new();
         let mut pending = Vec::new();
         for shard in 0..self.shared.workers {
-            let subset: Option<Vec<Vec<u8>>> = info_hashes.as_ref().map(|hashes| {
-                hashes
-                    .iter()
-                    // Unknown hashes (no swarm anywhere) are in no subset: 0 / 0 entries.
-                    .filter(|h| self.owner(h) == Some(shard))
-                    .cloned()
-                    .collect()
-            });
-            if subset.as_ref().is_some_and(|s| s.is_empty()) {
+            let subset: Vec<Vec<u8>> = info_hashes
+                .iter()
+                // Unknown hashes (no swarm anywhere) are in no subset: 0 / 0 entries.
+                .filter(|h| self.owner(h) == Some(shard))
+                .cloned()
+                .collect();
+            if subset.is_empty() {
                 continue;
             }
             if shard == self.id {
-                entries.extend(scrape_entries(&self.shard.borrow(), subset.as_deref()));
+                entries.extend(scrape_entries(&self.shard.borrow(), &subset));
             } else {
                 let (reply, rx) = oneshot::channel();
                 self.push_remote(
@@ -773,24 +769,15 @@ impl Worker {
         // The worker's encoder (no await below), so the reply is counted like any other.
         let mut encoder = self.encoder.borrow_mut();
         let out: &mut dyn Outbox<wt_proto::Payload<'_>> = &mut *encoder;
-        match &info_hashes {
-            None => {
-                for e in &entries {
-                    out.scrape_entry(conn, &e.info_hash, e.complete, e.incomplete, e.complete);
-                }
-            }
-            Some(hashes) => {
-                let found: HashMap<&[u8], &ScrapeEntry> = entries
-                    .iter()
-                    .map(|e| (e.info_hash.as_slice(), e))
-                    .collect();
-                for h in hashes {
-                    let (complete, incomplete) = found
-                        .get(h.as_slice())
-                        .map_or((0, 0), |e| (e.complete, e.incomplete));
-                    out.scrape_entry(conn, h, complete, incomplete, complete);
-                }
-            }
+        let found: HashMap<&[u8], &ScrapeEntry> = entries
+            .iter()
+            .map(|e| (e.info_hash.as_slice(), e))
+            .collect();
+        for h in &info_hashes {
+            let (complete, incomplete) = found
+                .get(h.as_slice())
+                .map_or((0, 0), |e| (e.complete, e.incomplete));
+            out.scrape_entry(conn, h, complete, incomplete, complete);
         }
         out.scrape_end(conn);
         let batch = encoder.take();
@@ -951,27 +938,17 @@ fn top_swarms(shard: &Shard, top: usize) -> TopSwarms {
     (keys, shard.swarm_count())
 }
 
-fn scrape_entries(shard: &Shard, info_hashes: Option<&[Vec<u8>]>) -> Vec<ScrapeEntry> {
-    match info_hashes {
-        None => shard
-            .swarms()
-            .map(|(h, s)| ScrapeEntry {
-                info_hash: h.as_bytes().to_vec(),
+fn scrape_entries(shard: &Shard, info_hashes: &[Vec<u8>]) -> Vec<ScrapeEntry> {
+    info_hashes
+        .iter()
+        .filter_map(|h| {
+            shard.swarm_stats(h).map(|s| ScrapeEntry {
+                info_hash: h.clone(),
                 complete: s.complete,
                 incomplete: s.incomplete(),
             })
-            .collect(),
-        Some(hashes) => hashes
-            .iter()
-            .filter_map(|h| {
-                shard.swarm_stats(h).map(|s| ScrapeEntry {
-                    info_hash: h.clone(),
-                    complete: s.complete,
-                    incomplete: s.incomplete(),
-                })
-            })
-            .collect(),
-    }
+        })
+        .collect()
 }
 
 /// A listener as seen by one worker.
