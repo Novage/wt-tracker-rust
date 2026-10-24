@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use common::{Event, OFFERS, Recorder, announce, announce_with, sorted_strings, stop, swarm_peers};
 use wt_core::{
-    AnnounceEvent, ConnId, MAX_KEY_LEN, OfferSelection, Request, ScrapeTarget, Settings, Shard,
-    SwarmStats, TrackerError,
+    AnnounceEvent, ConnId, MAX_KEY_LEN, OfferSelection, Request, Settings, Shard, SwarmStats,
+    TrackerError,
 };
 
 fn shard() -> Shard {
@@ -523,7 +523,7 @@ fn expire_removes_stale_memberships_and_empty_peers() {
 }
 
 #[test]
-fn scrape_all_one_and_many() {
+fn scrape_one_and_many() {
     let mut shard = shard();
     let mut out = Recorder::default();
     announce(
@@ -540,9 +540,14 @@ fn scrape_all_one_and_many() {
     announce(&mut shard, &mut out, 0, 2, "Y", "b", AnnounceEvent::Started).unwrap();
     out.take();
 
-    let mut scrape = |target: ScrapeTarget<'_>| {
+    let mut scrape = |info_hashes: &[&[u8]]| {
         shard
-            .handle(0, ConnId(9), Request::Scrape::<u32> { target }, &mut out)
+            .handle(
+                0,
+                ConnId(9),
+                Request::Scrape::<u32> { info_hashes },
+                &mut out,
+            )
             .unwrap();
         out.take()
     };
@@ -555,16 +560,10 @@ fn scrape_all_one_and_many() {
     };
     let end = Event::ScrapeEnd { to: ConnId(9) };
 
+    assert_eq!(scrape(&[b"X"]), [entry(b"X", 1, 1), end.clone()]);
+    assert_eq!(scrape(&[b"nope"]), [entry(b"nope", 0, 0), end.clone()]);
     assert_eq!(
-        scrape(ScrapeTarget::One(b"X")),
-        [entry(b"X", 1, 1), end.clone()]
-    );
-    assert_eq!(
-        scrape(ScrapeTarget::One(b"nope")),
-        [entry(b"nope", 0, 0), end.clone()]
-    );
-    assert_eq!(
-        scrape(ScrapeTarget::Many(&[b"Y", b"nope"])),
+        scrape(&[b"Y", b"nope"]),
         [entry(b"Y", 0, 1), entry(b"nope", 0, 0), end.clone()]
     );
 }

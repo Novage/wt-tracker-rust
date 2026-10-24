@@ -14,12 +14,6 @@ pub enum AnnounceEvent {
     Completed,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum ScrapeTarget<'a> {
-    One(&'a [u8]),
-    Many(&'a [&'a [u8]]),
-}
-
 /// A request already decoded from the wire. `O` is the opaque offer/answer payload; the core
 /// never inspects it, only hands it back through [`Outbox`].
 ///
@@ -54,7 +48,7 @@ pub enum Request<'a, O> {
         peer_id: &'a [u8],
     },
     Scrape {
-        target: ScrapeTarget<'a>,
+        info_hashes: &'a [&'a [u8]],
     },
 }
 

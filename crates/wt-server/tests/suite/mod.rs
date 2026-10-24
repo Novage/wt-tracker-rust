@@ -83,52 +83,56 @@ async fn paused_announce_is_a_periodic_announce() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scrape_merges_shards_in_request_order() {
-    let server = hashed(4);
-    let mut clients = Vec::new();
-    for (i, info_hash) in H[..6].iter().enumerate() {
-        for p in 0..=i {
-            let mut ws = connect(&server).await;
-            let event = if p == 0 {
-                r#","event":"completed""#
-            } else {
-                ""
-            };
-            send(&mut ws, &format!(r#"{{"action":"announce","info_hash":"{info_hash}","peer_id":"p{i}-{p}"{event}}}"#)).await;
-            recv(&mut ws).await.unwrap();
-            clients.push(ws);
+    // `hash`: every hash has an owner; `content` (the default): the directory, "nope" in none.
+    for server in [hashed(4), plain(4)] {
+        let mut clients = Vec::new();
+        for (i, info_hash) in H[..6].iter().enumerate() {
+            for p in 0..=i {
+                let mut ws = connect(&server).await;
+                let event = if p == 0 {
+                    r#","event":"completed""#
+                } else {
+                    ""
+                };
+                send(&mut ws, &format!(r#"{{"action":"announce","info_hash":"{info_hash}","peer_id":"p{i}-{p}"{event}}}"#)).await;
+                recv(&mut ws).await.unwrap();
+                clients.push(ws);
+            }
         }
-    }
-    let mut ws = connect(&server).await;
-    send(
-        &mut ws,
-        &format!(
-            r#"{{"action":"scrape","info_hash":["{}","nope","{}","{}"]}}"#,
-            H[3], H[1], H[3]
-        ),
-    )
-    .await;
-    assert_eq!(
-        recv(&mut ws).await.unwrap(),
-        format!(
-            r#"{{"action":"scrape","files":{{"{}":{{"complete":1,"incomplete":3,"downloaded":1}},"nope":{{"complete":0,"incomplete":0,"downloaded":0}},"{}":{{"complete":1,"incomplete":1,"downloaded":1}}}}}}"#,
-            H[3], H[1]
+        let mut ws = connect(&server).await;
+        send(
+            &mut ws,
+            &format!(
+                r#"{{"action":"scrape","info_hash":["{}","nope","{}","{}"]}}"#,
+                H[3], H[1], H[3]
+            ),
         )
-    );
+        .await;
+        assert_eq!(
+            recv(&mut ws).await.unwrap(),
+            format!(
+                r#"{{"action":"scrape","files":{{"{}":{{"complete":1,"incomplete":3,"downloaded":1}},"nope":{{"complete":0,"incomplete":0,"downloaded":0}},"{}":{{"complete":1,"incomplete":1,"downloaded":1}}}}}}"#,
+                H[3], H[1]
+            )
+        );
 
-    // Scrape of all swarms: no reply, so the next message answers the next scrape (spec §8).
-    send(&mut ws, r#"{"action":"scrape"}"#).await;
-    send(
-        &mut ws,
-        &format!(r#"{{"action":"scrape","info_hash":"{}"}}"#, H[2]),
-    )
-    .await;
-    assert_eq!(
-        recv(&mut ws).await.unwrap(),
-        format!(
-            r#"{{"action":"scrape","files":{{"{}":{{"complete":1,"incomplete":2,"downloaded":1}}}}}}"#,
-            H[2]
+        // Scrape of all swarms: no reply (spec §8).
+        send(&mut ws, r#"{"action":"scrape"}"#).await;
+        let late = tokio::time::timeout(Duration::from_millis(300), recv(&mut ws)).await;
+        assert!(late.is_err(), "scrape-all replied: {late:?}");
+        send(
+            &mut ws,
+            &format!(r#"{{"action":"scrape","info_hash":"{}"}}"#, H[2]),
         )
-    );
+        .await;
+        assert_eq!(
+            recv(&mut ws).await.unwrap(),
+            format!(
+                r#"{{"action":"scrape","files":{{"{}":{{"complete":1,"incomplete":2,"downloaded":1}}}}}}"#,
+                H[2]
+            )
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

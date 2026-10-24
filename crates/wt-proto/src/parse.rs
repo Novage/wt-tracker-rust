@@ -46,7 +46,8 @@ pub enum Message<'a> {
         peer_id: Option<Key>,
     },
     Scrape {
-        /// `None`: all swarms. Otherwise the requested hashes in order (may be empty).
+        /// `None`: no `info_hash`; ignored, no reply (spec §8). Otherwise the requested hashes
+        /// in order (may be empty).
         info_hashes: Option<SmallVec<[Cow<'a, [u8]>; 4]>>,
     },
 }

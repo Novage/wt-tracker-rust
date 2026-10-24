@@ -34,11 +34,11 @@ announce, every offer answered (`loadtest/run.sh`; full table in
 
 | Profile | Server | CPU µs / message | KiB / connection | RTT p50 |
 |---|---|---:|---:|---:|
-| 3000 connections, announce every 5 s | JS tracker | 17.3 | 36.1 | 0.46 ms |
-| | Rust, 1 worker | **12.2** | **5.7** | **0.25 ms** |
-| 4000 connections, 128k messages/s | JS tracker | 5.3 | 26.9 | 0.53 ms |
-| | Rust, 1 worker | **3.8** | **6.6** | **0.29 ms** |
-| | Rust, all cores | 4.8 | 7.2 | 0.30 ms |
+| 3000 connections, announce every 5 s | JS tracker | 21.4 | 35.4 | 0.50 ms |
+| | Rust, 1 worker | **10.4** | **5.8** | **0.24 ms** |
+| 4000 connections, 128k messages/s | JS tracker | 5.5 | 27.5 | 0.58 ms |
+| | Rust, 1 worker | **3.6** | **6.3** | **0.27 ms** |
+| | Rust, all cores | 4.8 | 6.7 | 0.29 ms |
 
 **In production** at `wss://tracker.novage.com.ua` (Oracle Ampere A1, 2 cores, real
 p2p-media-loader peers, ~42k connections): 0.35 cores and 590 MiB, against 1.46 cores and 1.9 GiB

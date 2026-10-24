@@ -1621,6 +1621,8 @@ name = "wt-proto"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "foldhash",
+ "hashbrown",
  "itoa",
  "proptest",
  "serde",

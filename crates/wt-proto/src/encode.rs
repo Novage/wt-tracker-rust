@@ -1,7 +1,11 @@
 //! [`Outbox`] → JSON messages, in exactly the layout the JS tracker produces with
 //! `JSON.stringify` of its message objects.
 
+use std::hash::BuildHasher;
+
 use bytes::Bytes;
+use foldhash::fast::RandomState;
+use hashbrown::HashTable;
 use wt_core::{ConnId, Key, Outbox};
 
 use crate::Payload;
@@ -93,7 +97,7 @@ enum Kind {
     Scrape,
 }
 
-/// Largest buffer capacity [`Encoder::take`] carries over to the next batch.
+/// Largest buffer capacity [`Encoder::take`] gives the next buffer after moving one out.
 const KEEP_CAPACITY: usize = 64 * 1024;
 
 /// Collects outgoing messages into one reusable buffer. Call [`Encoder::clear`] after the
@@ -105,7 +109,8 @@ pub struct Encoder {
     removed: Vec<(Key, ConnId)>,
     scrape: Option<OpenScrape>,
     /// Escaped `files` keys of the open scrape (ranges in `buf`), for de-duplication.
-    scrape_keys: Vec<(u32, u32)>,
+    scrape_keys: HashTable<(u32, u32)>,
+    hasher: RandomState,
     /// Not reset by [`Encoder::clear`] / [`Encoder::take`].
     counters: Counters,
 }
@@ -145,19 +150,24 @@ impl Encoder {
         self.counters
     }
 
-    /// Moves the messages out as one shared buffer (no copy of message bytes) and clears the
-    /// encoder. Costs one buffer allocation per batch instead of one per message. The next
-    /// buffer keeps at most 64 KiB of capacity: a batch stays allocated while any of its
-    /// messages waits in a queue, so one large batch must not make every later one large.
+    /// Moves the messages out as one shared buffer and clears the encoder. Costs one buffer
+    /// allocation per batch instead of one per message. A batch stays allocated while any of
+    /// its messages waits in a queue, so it keeps at most twice its size: a batch that fills
+    /// less than half of the buffer is copied out and the buffer reused; a larger one is moved
+    /// out, and the next buffer gets at most 64 KiB of capacity.
     pub fn take(&mut self) -> Batch {
-        let capacity = self.buf.capacity().min(KEEP_CAPACITY);
-        let buf = std::mem::replace(&mut self.buf, Vec::with_capacity(capacity));
+        let bytes = if self.buf.len() * 2 < self.buf.capacity() {
+            Bytes::copy_from_slice(&self.buf)
+        } else {
+            let capacity = self.buf.capacity().min(KEEP_CAPACITY);
+            Bytes::from(std::mem::replace(
+                &mut self.buf,
+                Vec::with_capacity(capacity),
+            ))
+        };
         let messages = std::mem::take(&mut self.messages);
         self.clear();
-        Batch {
-            bytes: Bytes::from(buf),
-            messages,
-        }
+        Batch { bytes, messages }
     }
 
     #[inline]
@@ -260,24 +270,23 @@ impl<'a> Outbox<Payload<'a>> for Encoder {
     ) {
         self.open_scrape(to);
         let mark = self.buf.len();
-        let first = self.scrape_keys.is_empty();
-        if !first {
+        if !self.scrape_keys.is_empty() {
             self.buf.push(b',');
         }
         let key_start = self.buf.len();
         write_string(&mut self.buf, info_hash);
-        let key = &self.buf[key_start..];
+        let (buf, hasher) = (&self.buf, &self.hasher);
+        let range = |&(s, e): &(u32, u32)| &buf[s as usize..e as usize];
+        let key = &buf[key_start..];
+        let hash = hasher.hash_one(key);
         // A repeated hash keeps its first entry (JS object key semantics).
-        if self
-            .scrape_keys
-            .iter()
-            .any(|&(s, e)| &self.buf[s as usize..e as usize] == key)
-        {
+        if self.scrape_keys.find(hash, |k| range(k) == key).is_some() {
             self.buf.truncate(mark);
             return;
         }
+        let entry = (key_start as u32, buf.len() as u32);
         self.scrape_keys
-            .push((key_start as u32, self.buf.len() as u32));
+            .insert_unique(hash, entry, |k| hasher.hash_one(range(k)));
         let b = &mut self.buf;
         b.extend_from_slice(b":{\"complete\":");
         write_u32(b, complete);
@@ -306,10 +315,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_large_batch_does_not_make_the_next_buffer_large() {
+    fn a_batch_keeps_at_most_twice_its_size() {
         let mut encoder = Encoder::new();
         encoder.buf.resize(4 << 20, b' ');
         let _ = encoder.take();
-        assert_eq!(encoder.buf.capacity(), KEEP_CAPACITY);
+        assert_eq!(encoder.buf.capacity(), KEEP_CAPACITY, "large: moved out");
+        encoder.buf.resize(100, b' ');
+        assert_eq!(encoder.take().bytes.len(), 100);
+        assert_eq!(
+            encoder.buf.capacity(),
+            KEEP_CAPACITY,
+            "small: copied, buffer reused"
+        );
     }
 }

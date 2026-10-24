@@ -15,7 +15,7 @@ mod parse;
 use std::fmt;
 
 use smallvec::SmallVec;
-use wt_core::{ConnId, Request, ScrapeTarget, Shard, TrackerError};
+use wt_core::{ConnId, Request, Shard, TrackerError};
 
 pub use encode::{Batch, Count, Counters, Encoder};
 pub use owned::OwnedMessage;
@@ -170,8 +170,13 @@ pub fn apply(
             info_hashes: Some(hashes),
         } => {
             let slices: SmallVec<[&[u8]; 4]> = hashes.iter().map(|h| h.as_ref()).collect();
-            let target = ScrapeTarget::Many(&slices);
-            shard.handle(now, conn, Request::Scrape::<Payload<'_>> { target }, out)?;
+            let info_hashes = &slices[..];
+            shard.handle(
+                now,
+                conn,
+                Request::Scrape::<Payload<'_>> { info_hashes },
+                out,
+            )?;
         }
     }
     Ok(())

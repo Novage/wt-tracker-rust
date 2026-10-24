@@ -738,13 +738,14 @@ impl Worker {
     async fn scrape(self: &Rc<Self>, conn: ConnId, info_hashes: Vec<Vec<u8>>) {
         let mut entries: Vec<ScrapeEntry> = Vec::new();
         let mut pending = Vec::new();
-        for shard in 0..self.shared.workers {
-            let subset: Vec<Vec<u8>> = info_hashes
-                .iter()
-                // Unknown hashes (no swarm anywhere) are in no subset: 0 / 0 entries.
-                .filter(|h| self.owner(h) == Some(shard))
-                .cloned()
-                .collect();
+        let mut subsets: Vec<Vec<Vec<u8>>> = vec![Vec::new(); self.shared.workers];
+        for h in &info_hashes {
+            // Unknown hashes (no swarm anywhere) are in no subset: 0 / 0 entries.
+            if let Some(shard) = self.owner(h) {
+                subsets[shard].push(h.clone());
+            }
+        }
+        for (shard, subset) in subsets.into_iter().enumerate() {
             if subset.is_empty() {
                 continue;
             }

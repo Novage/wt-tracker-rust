@@ -7,7 +7,7 @@ use hashbrown::HashTable;
 use slab::Slab;
 use smallvec::SmallVec;
 
-use crate::{AnnounceEvent, ConnId, Key, Outbox, Request, ScrapeTarget, TrackerError};
+use crate::{AnnounceEvent, ConnId, Key, Outbox, Request, TrackerError};
 
 /// How receivers are chosen when the swarm has more peers than offers to send.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -170,8 +170,8 @@ impl Shard {
                 self.stop(conn, info_hash, peer_id, out);
                 Ok(())
             }
-            Request::Scrape { target } => {
-                self.scrape(conn, target, out);
+            Request::Scrape { info_hashes } => {
+                self.scrape(conn, info_hashes, out);
                 Ok(())
             }
         }
@@ -407,27 +407,18 @@ impl Shard {
         }
     }
 
-    fn scrape<O>(&self, conn: ConnId, target: ScrapeTarget<'_>, out: &mut impl Outbox<O>) {
-        match target {
-            ScrapeTarget::One(info_hash) => self.scrape_one(conn, info_hash, out),
-            ScrapeTarget::Many(info_hashes) => {
-                for info_hash in info_hashes {
-                    self.scrape_one(conn, info_hash, out);
+    fn scrape<O>(&self, conn: ConnId, info_hashes: &[&[u8]], out: &mut impl Outbox<O>) {
+        for info_hash in info_hashes {
+            let (complete, incomplete) = match self.find_swarm(info_hash) {
+                Some(s) => {
+                    let s = &self.swarms[s as usize];
+                    (s.completed, s.slots.len() as u32 - s.completed)
                 }
-            }
+                None => (0, 0),
+            };
+            out.scrape_entry(conn, info_hash, complete, incomplete, complete);
         }
         out.scrape_end(conn);
-    }
-
-    fn scrape_one<O>(&self, conn: ConnId, info_hash: &[u8], out: &mut impl Outbox<O>) {
-        let (complete, incomplete) = match self.find_swarm(info_hash) {
-            Some(s) => {
-                let s = &self.swarms[s as usize];
-                (s.completed, s.slots.len() as u32 - s.completed)
-            }
-            None => (0, 0),
-        };
-        out.scrape_entry(conn, info_hash, complete, incomplete, complete);
     }
 
     // ---- index helpers ----

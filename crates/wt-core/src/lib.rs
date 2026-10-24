@@ -6,5 +6,5 @@ mod request;
 mod shard;
 
 pub use key::{Key, MAX_KEY_LEN};
-pub use request::{AnnounceEvent, ConnId, NullOutbox, Outbox, Request, ScrapeTarget, TrackerError};
+pub use request::{AnnounceEvent, ConnId, NullOutbox, Outbox, Request, TrackerError};
 pub use shard::{OfferSelection, Settings, Shard, SwarmStats};

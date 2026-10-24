@@ -8,49 +8,49 @@
   "scaling": [
     {
       "mode": "strong",
-      "ops_per_sec": 7964068.776370607,
+      "ops_per_sec": 7710151.123716618,
       "threads": 1
     },
     {
       "mode": "strong",
-      "ops_per_sec": 10567739.598308945,
+      "ops_per_sec": 9764536.766958188,
       "threads": 2
     },
     {
       "mode": "strong",
-      "ops_per_sec": 18544807.882384047,
+      "ops_per_sec": 17175797.869485404,
       "threads": 4
     },
     {
       "mode": "strong",
-      "ops_per_sec": 33664891.36732313,
+      "ops_per_sec": 32174361.013168484,
       "threads": 8
     },
     {
       "mode": "weak",
-      "ops_per_sec": 7759111.219328681,
+      "ops_per_sec": 8186843.489629666,
       "threads": 1
     },
     {
       "mode": "weak",
-      "ops_per_sec": 10182689.700744241,
+      "ops_per_sec": 9782953.17257394,
       "threads": 2
     },
     {
       "mode": "weak",
-      "ops_per_sec": 15291281.649008075,
+      "ops_per_sec": 14823402.078740848,
       "threads": 4
     },
     {
       "mode": "weak",
-      "ops_per_sec": 19883500.88374774,
+      "ops_per_sec": 19758831.33384343,
       "threads": 8
     }
   ],
   "scenarios": [
     {
-      "median_ms_per_run": 11.980084,
-      "median_ns_per_op": 119.80084,
+      "median_ms_per_run": 11.727625,
+      "median_ns_per_op": 117.27625,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -58,14 +58,14 @@
         "removed": 0,
         "replies": 100000
       },
-      "min_ns_per_op": 117.09875,
+      "min_ns_per_op": 115.54709,
       "name": "join_one_swarm",
       "ops": 100000,
-      "ops_per_sec": 8347186.8811604325
+      "ops_per_sec": 8526875.646177296
     },
     {
-      "median_ms_per_run": 214.528167,
-      "median_ns_per_op": 214.528167,
+      "median_ms_per_run": 210.700625,
+      "median_ns_per_op": 210.700625,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -73,14 +73,14 @@
         "removed": 0,
         "replies": 1000000
       },
-      "min_ns_per_op": 210.976917,
+      "min_ns_per_op": 204.809375,
       "name": "join_many_swarms",
       "ops": 1000000,
-      "ops_per_sec": 4661392.552708475
+      "ops_per_sec": 4746070.402021826
     },
     {
-      "median_ms_per_run": 90.514792,
-      "median_ns_per_op": 150.85798666666668,
+      "median_ms_per_run": 91.37158400000001,
+      "median_ns_per_op": 152.28597333333335,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -88,14 +88,14 @@
         "removed": 0,
         "replies": 600000
       },
-      "min_ns_per_op": 149.87173666666666,
+      "min_ns_per_op": 152.03618166666666,
       "name": "multi_peer_join",
       "ops": 600000,
-      "ops_per_sec": 6628750.801305493
+      "ops_per_sec": 6566592.957390341
     },
     {
-      "median_ms_per_run": 72.241708,
-      "median_ns_per_op": 120.40284666666666,
+      "median_ms_per_run": 73.909666,
+      "median_ns_per_op": 123.18277666666667,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -103,14 +103,14 @@
         "removed": 0,
         "replies": 600000
       },
-      "min_ns_per_op": 118.51888833333334,
+      "min_ns_per_op": 120.45958333333333,
       "name": "reannounce",
       "ops": 600000,
-      "ops_per_sec": 8305451.471330107
+      "ops_per_sec": 8118018.014044333
     },
     {
-      "median_ms_per_run": 130.467917,
-      "median_ns_per_op": 130.467917,
+      "median_ms_per_run": 147.91579199999998,
+      "median_ns_per_op": 147.915792,
       "messages": {
         "answers": 1000000,
         "bytes": 0,
@@ -118,14 +118,14 @@
         "removed": 0,
         "replies": 0
       },
-      "min_ns_per_op": 129.954708,
+      "min_ns_per_op": 143.153584,
       "name": "answer",
       "ops": 1000000,
-      "ops_per_sec": 7664719.595392943
+      "ops_per_sec": 6760603.357348079
     },
     {
-      "median_ms_per_run": 7.250292,
-      "median_ns_per_op": 72.50292,
+      "median_ms_per_run": 7.3071660000000005,
+      "median_ns_per_op": 73.07166,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -133,14 +133,14 @@
         "removed": 0,
         "replies": 100000
       },
-      "min_ns_per_op": 72.32958,
+      "min_ns_per_op": 71.515,
       "name": "reannounce_one_swarm",
       "ops": 100000,
-      "ops_per_sec": 13792547.94151739
+      "ops_per_sec": 13685196.148547877
     },
     {
-      "median_ms_per_run": 58.480833000000004,
-      "median_ns_per_op": 97.468055,
+      "median_ms_per_run": 53.14325,
+      "median_ns_per_op": 88.57208333333334,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -148,14 +148,14 @@
         "removed": 0,
         "replies": 600000
       },
-      "min_ns_per_op": 95.92520833333333,
+      "min_ns_per_op": 80.95965333333334,
       "name": "reannounce_window",
       "ops": 600000,
-      "ops_per_sec": 10259771.778558625
+      "ops_per_sec": 11290239.117855983
     },
     {
-      "median_ms_per_run": 4.767208999999999,
-      "median_ns_per_op": 47.67209,
+      "median_ms_per_run": 4.895667,
+      "median_ns_per_op": 48.95667,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -163,14 +163,14 @@
         "removed": 0,
         "replies": 100000
       },
-      "min_ns_per_op": 46.95667,
+      "min_ns_per_op": 48.81416,
       "name": "reannounce_one_swarm_window",
       "ops": 100000,
-      "ops_per_sec": 20976634.336778607
+      "ops_per_sec": 20426225.885053046
     },
     {
-      "median_ms_per_run": 51.991292,
-      "median_ns_per_op": 86.65215333333333,
+      "median_ms_per_run": 46.188167,
+      "median_ns_per_op": 76.98027833333333,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -178,14 +178,14 @@
         "removed": 0,
         "replies": 600000
       },
-      "min_ns_per_op": 84.57826333333334,
+      "min_ns_per_op": 73.85090166666667,
       "name": "reannounce_round_robin",
       "ops": 600000,
-      "ops_per_sec": 11540394.110613754
+      "ops_per_sec": 12990340.144912006
     },
     {
-      "median_ms_per_run": 4.469875,
-      "median_ns_per_op": 44.69875,
+      "median_ms_per_run": 4.565167,
+      "median_ns_per_op": 45.65167,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -193,14 +193,14 @@
         "removed": 0,
         "replies": 100000
       },
-      "min_ns_per_op": 44.65083,
+      "min_ns_per_op": 44.52791,
       "name": "reannounce_one_swarm_round_robin",
       "ops": 100000,
-      "ops_per_sec": 22371990.268184233
+      "ops_per_sec": 21905003.694278874
     },
     {
-      "median_ms_per_run": 52.421875,
-      "median_ns_per_op": 87.36979166666667,
+      "median_ms_per_run": 55.529375,
+      "median_ns_per_op": 92.54895833333333,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -208,14 +208,14 @@
         "removed": 300000,
         "replies": 0
       },
-      "min_ns_per_op": 86.47666666666667,
+      "min_ns_per_op": 90.52763833333333,
       "name": "stop_all",
       "ops": 600000,
-      "ops_per_sec": 11445603.576751119
+      "ops_per_sec": 10805091.899557667
     },
     {
-      "median_ms_per_run": 23.412625,
-      "median_ns_per_op": 234.12625,
+      "median_ms_per_run": 24.392208,
+      "median_ns_per_op": 243.92208,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -223,14 +223,14 @@
         "removed": 300000,
         "replies": 0
       },
-      "min_ns_per_op": 226.36958,
+      "min_ns_per_op": 241.0975,
       "name": "disconnect_all",
       "ops": 100000,
-      "ops_per_sec": 4271199.833423207
+      "ops_per_sec": 4099669.8617853704
     },
     {
-      "median_ms_per_run": 14.950708,
-      "median_ns_per_op": 24.917846666666666,
+      "median_ms_per_run": 14.410375,
+      "median_ns_per_op": 24.017291666666665,
       "messages": {
         "answers": 0,
         "bytes": 0,
@@ -238,14 +238,14 @@
         "removed": 150000,
         "replies": 0
       },
-      "min_ns_per_op": 24.138263333333335,
+      "min_ns_per_op": 23.32132,
       "name": "expire_sweep",
       "ops": 600000,
-      "ops_per_sec": 40131878.70433962
+      "ops_per_sec": 41636668.02564125
     },
     {
-      "median_ms_per_run": 136.997834,
-      "median_ns_per_op": 6849.8917,
+      "median_ms_per_run": 138.17812500000002,
+      "median_ns_per_op": 6908.90625,
       "messages": {
         "answers": 0,
         "bytes": 292020000,
@@ -253,14 +253,14 @@
         "removed": 0,
         "replies": 0
       },
-      "min_ns_per_op": 6839.09375,
+      "min_ns_per_op": 6729.7229,
       "name": "proto_parse_announce_serde_json",
       "ops": 20000,
-      "ops_per_sec": 145987.7095575102
+      "ops_per_sec": 144740.71058642602
     },
     {
-      "median_ms_per_run": 649.875958,
-      "median_ns_per_op": 32493.7979,
+      "median_ms_per_run": 650.046875,
+      "median_ns_per_op": 32502.34375,
       "messages": {
         "answers": 0,
         "bytes": 292020000,
@@ -268,14 +268,14 @@
         "removed": 0,
         "replies": 0
       },
-      "min_ns_per_op": 32467.76045,
+      "min_ns_per_op": 32363.675,
       "name": "proto_parse_announce_sonic",
       "ops": 20000,
-      "ops_per_sec": 30775.103700635747
+      "ops_per_sec": 30767.01199432733
     },
     {
-      "median_ms_per_run": 20.314625,
-      "median_ns_per_op": 1015.73125,
+      "median_ms_per_run": 19.989957999999998,
+      "median_ns_per_op": 999.4979,
       "messages": {
         "answers": 0,
         "bytes": 308580000,
@@ -283,14 +283,14 @@
         "removed": 0,
         "replies": 20000
       },
-      "min_ns_per_op": 1011.29375,
+      "min_ns_per_op": 997.72915,
       "name": "proto_encode_announce",
       "ops": 20000,
-      "ops_per_sec": 984512.3894731014
+      "ops_per_sec": 1000502.3522310553
     },
     {
-      "median_ms_per_run": 162.840625,
-      "median_ns_per_op": 8142.03125,
+      "median_ms_per_run": 163.041666,
+      "median_ns_per_op": 8152.0833,
       "messages": {
         "answers": 0,
         "bytes": 308580000,
@@ -298,14 +298,14 @@
         "removed": 0,
         "replies": 20000
       },
-      "min_ns_per_op": 8092.8229,
+      "min_ns_per_op": 7885.0229,
       "name": "pipeline_reannounce_serde_json",
       "ops": 20000,
-      "ops_per_sec": 122819.4745629354
+      "ops_per_sec": 122668.03014635535
     },
     {
-      "median_ms_per_run": 676.4734169999999,
-      "median_ns_per_op": 33823.67085,
+      "median_ms_per_run": 676.03875,
+      "median_ns_per_op": 33801.9375,
       "messages": {
         "answers": 0,
         "bytes": 308580000,
@@ -313,14 +313,14 @@
         "removed": 0,
         "replies": 20000
       },
-      "min_ns_per_op": 33786.55205,
+      "min_ns_per_op": 33658.18335,
       "name": "pipeline_reannounce_sonic",
       "ops": 20000,
-      "ops_per_sec": 29565.093760365755
+      "ops_per_sec": 29584.10298226248
     },
     {
-      "median_ms_per_run": 18.561,
-      "median_ns_per_op": 928.05,
+      "median_ms_per_run": 18.423667000000002,
+      "median_ns_per_op": 921.18335,
       "messages": {
         "answers": 20000,
         "bytes": 30700000,
@@ -328,14 +328,14 @@
         "removed": 0,
         "replies": 0
       },
-      "min_ns_per_op": 919.71455,
+      "min_ns_per_op": 913.325,
       "name": "pipeline_answer_serde_json",
       "ops": 20000,
-      "ops_per_sec": 1077528.1504229298
+      "ops_per_sec": 1085560.2199062759
     },
     {
-      "median_ms_per_run": 22.915708,
-      "median_ns_per_op": 1145.7854,
+      "median_ms_per_run": 23.008125,
+      "median_ns_per_op": 1150.40625,
       "messages": {
         "answers": 20000,
         "bytes": 30700000,
@@ -343,10 +343,10 @@
         "removed": 0,
         "replies": 0
       },
-      "min_ns_per_op": 1136.44165,
+      "min_ns_per_op": 1142.87915,
       "name": "pipeline_answer_sonic",
       "ops": 20000,
-      "ops_per_sec": 872763.7828165728
+      "ops_per_sec": 869258.1425040067
     }
   ]
 }
