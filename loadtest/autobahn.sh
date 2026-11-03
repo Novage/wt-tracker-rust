@@ -47,8 +47,9 @@ EOF
       rm -rf "$OUT/reports-$name"
       # --add-host: host.docker.internal on Linux too (Docker Desktop defines it already).
       status=0
+      # PYTHONUNBUFFERED: a killed wstest still leaves its log, up to the last case it ran.
       docker run --rm --platform "$PLATFORM" --add-host=host.docker.internal:host-gateway \
-        -v "$PWD/$OUT:/out" "$IMAGE" \
+        -e PYTHONUNBUFFERED=1 -v "$PWD/$OUT:/out" "$IMAGE" \
         wstest -m fuzzingclient -s "/out/fuzzingclient-$name.json" > "$OUT/wstest-$name.log" 2>&1 \
         || status=$?
       if [ "$status" -ne 0 ]; then
@@ -56,6 +57,9 @@ EOF
         # in CI): report it and run the group again.
         echo "$agent group $g, attempt $attempt: docker / wstest exited with status $status" >&2
         tail -20 "$OUT/wstest-$name.log" >&2
+        # 137 (SIGKILL): was it the kernel's out-of-memory killer (seen in CI, 2026-11-03)?
+        free -m >&2 || true
+        sudo -n dmesg 2>/dev/null | grep -iE "out of memory|oom-kill|killed process" | tail -5 >&2 || true
       elif ! grep -q "failed (User timeout" "$OUT/wstest-$name.log"; then
         break
       else
