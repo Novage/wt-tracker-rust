@@ -77,6 +77,8 @@ All notable changes to this project are listed here. The format follows
 
 ### Changed
 
+- The `rejected_message` log line also has the connection's `origin`, and for an unknown
+  announce event the value it had (`event_value`), to see which client sends it.
 - `"event":"paused"` (BEP 21 partial seed, sent by libtorrent and Transmission on every announce
   while a partial seed) is a periodic announce, as in the reference `bittorrent-tracker`; it
   closed the connection as an unknown event before.

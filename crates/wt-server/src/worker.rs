@@ -250,16 +250,41 @@ impl Worker {
     }
 
     /// Counts and logs (rate-limited) a rejected message.
-    fn reject(&self, e: &ProtoError) {
+    /// Counts and logs a rejected message of `conn`. `origin`: the connection's `Origin` (empty:
+    /// none, or a connection of another worker); an unknown event also logs its value from
+    /// `frame`, to see which client sends it.
+    fn reject(&self, e: &ProtoError, conn: ConnId, frame: Option<&[u8]>) {
         let reason = RejectReason::from(e);
         self.rejected.add(reason as usize, 1);
-        crate::event_limited!(
-            Info,
-            "rejected_message",
-            reason = reason.as_str(),
-            error = e,
-            worker = self.id
-        );
+        match frame {
+            Some(frame) if *e == ProtoError::UnknownEvent => crate::event_limited!(
+                Info,
+                "rejected_message",
+                reason = reason.as_str(),
+                error = e,
+                event_value = event_value(frame),
+                origin = self.origin_of(conn),
+                worker = self.id
+            ),
+            _ => crate::event_limited!(
+                Info,
+                "rejected_message",
+                reason = reason.as_str(),
+                error = e,
+                origin = self.origin_of(conn),
+                worker = self.id
+            ),
+        }
+    }
+
+    /// The `Origin` of a connection of this worker (empty: none, or not this worker's).
+    fn origin_of(&self, conn: ConnId) -> Box<str> {
+        self.conns
+            .borrow()
+            .get(conn_slot(conn))
+            .filter(|e| conn_worker(conn) == self.id && e.generation == conn_generation(conn))
+            .map(|e| e.origin.clone())
+            .unwrap_or_default()
     }
 
     /// Tracker clock: seconds since the worker started.
@@ -510,7 +535,7 @@ impl Worker {
             Ok(message) => message,
             Err(e) => {
                 self.count_received(|r| r.invalid.add(frame.len()));
-                self.reject(&e);
+                self.reject(&e, conn, Some(frame));
                 return Err(e);
             }
         };
@@ -522,7 +547,7 @@ impl Worker {
         };
         let routed = self
             .route_message(conn, frame, &message, first)
-            .inspect_err(|e| self.reject(e))?;
+            .inspect_err(|e| self.reject(e, conn, Some(frame)))?;
         match routed {
             Routed::Done => {}
             Routed::Scrape(job) => {
@@ -695,7 +720,7 @@ impl Worker {
                                 &message.message(),
                                 &mut encoder,
                             ) {
-                                self.reject(&e);
+                                self.reject(&e, conn, None);
                                 rejected.push(conn);
                             }
                         }
@@ -939,6 +964,17 @@ fn top_swarms(shard: &Shard, top: usize) -> TopSwarms {
     (keys, shard.swarm_count())
 }
 
+/// The `event` member of a rejected frame as JSON text, cut to 40 characters (for the log).
+fn event_value(frame: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(frame)
+        .ok()
+        .and_then(|v| v.get("event").map(ToString::to_string))
+        .unwrap_or_default()
+        .chars()
+        .take(40)
+        .collect()
+}
+
 fn scrape_entries(shard: &Shard, info_hashes: &[Vec<u8>]) -> Vec<ScrapeEntry> {
     info_hashes
         .iter()
@@ -1020,6 +1056,18 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_value_is_the_json_text_cut_to_40_characters() {
+        let frame = |event: &str| format!(r#"{{"action":"announce","event":{event}}}"#);
+        assert_eq!(event_value(frame(r#""update""#).as_bytes()), r#""update""#);
+        assert_eq!(event_value(frame("5").as_bytes()), "5");
+        assert_eq!(
+            event_value(frame(&format!(r#""{}""#, "x".repeat(60))).as_bytes()).len(),
+            40
+        );
+        assert_eq!(event_value(b"{not json"), "");
+    }
 
     #[test]
     fn conn_id_packs_worker_generation_and_slot() {
