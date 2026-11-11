@@ -21,7 +21,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # The JS tracker the differential test compares against (github.com/Novage/wt-tracker).
-  WT_TRACKER_REF: 8ad751c7dae5fffe5b7a671796e18c507282fd25
+  WT_TRACKER_REF: fe54783c4f3b82c8cdb38a535185fe0f81c497dd
 
 jobs:
   check:

@@ -48,7 +48,7 @@ pub enum ProtoError {
     NotAnObject,
     /// `action` missing, not a string, or not `announce` / `scrape`.
     UnknownAction,
-    /// `event` present but not `started`, `completed` or `stopped`.
+    /// `event` present but not `started`, `completed`, `stopped`, `paused` or `update`.
     UnknownEvent,
     /// A field has the wrong type or an unsupported form.
     BadField(&'static str),

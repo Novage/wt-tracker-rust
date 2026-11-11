@@ -502,10 +502,14 @@ fn interpret<'a>(frame: &'a [u8], f: Fields<'a>) -> Result<Message<'a>, ProtoErr
         None => AnnounceEvent::None,
         Some(e) if is_string(e) && string_equals(e, "started") => AnnounceEvent::Started,
         Some(e) if is_string(e) && string_equals(e, "completed") => AnnounceEvent::Completed,
-        // BEP 21: a partial seed (finished, but not every file) sends "paused" on every announce
-        // (libtorrent, also over WebSocket; Transmission). Like the reference tracker, it is a
-        // periodic announce: the peer stays in the swarm (added if unknown), as incomplete.
-        Some(e) if is_string(e) && string_equals(e, "paused") => AnnounceEvent::None,
+        // Periodic announces, like no event (as in the reference tracker):
+        // - "paused": BEP 21 partial seed (finished, but not every file), sent on every announce
+        //   by libtorrent (also over WebSocket) and Transmission.
+        // - "update": the reference tracker's name for BEP 15 event 0; some third-party clients
+        //   send it literally.
+        Some(e) if is_string(e) && (string_equals(e, "paused") || string_equals(e, "update")) => {
+            AnnounceEvent::None
+        }
         Some(e) if is_string(e) && string_equals(e, "stopped") => {
             if !f.peer_id.is_some_and(is_string) {
                 return Err(ProtoError::BadField("peer_id"));

@@ -1060,7 +1060,7 @@ mod tests {
     #[test]
     fn event_value_is_the_json_text_cut_to_40_characters() {
         let frame = |event: &str| format!(r#"{{"action":"announce","event":{event}}}"#);
-        assert_eq!(event_value(frame(r#""update""#).as_bytes()), r#""update""#);
+        assert_eq!(event_value(frame(r#""nope""#).as_bytes()), r#""nope""#);
         assert_eq!(event_value(frame("5").as_bytes()), "5");
         assert_eq!(
             event_value(frame(&format!(r#""{}""#, "x".repeat(60))).as_bytes()).len(),

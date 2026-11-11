@@ -8,7 +8,7 @@ pub struct ConnId(pub u64);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AnnounceEvent {
-    /// No `event` field: a periodic re-announce.
+    /// No `event` field (or `"paused"` / `"update"`): a periodic re-announce.
     None,
     Started,
     Completed,
@@ -18,8 +18,10 @@ pub enum AnnounceEvent {
 /// never inspects it, only hands it back through [`Outbox`].
 ///
 /// Mapping from the JSON protocol (done by the protocol layer):
-/// - `action: "announce"`, `event` absent, `answer` present → [`Request::Answer`]
-/// - `action: "announce"`, `event` absent / `"started"` / `"completed"` → [`Request::Announce`]
+/// - `action: "announce"`, `event` absent / `"paused"` / `"update"`, `answer` present →
+///   [`Request::Answer`]
+/// - `action: "announce"`, `event` absent / `"paused"` / `"update"` / `"started"` /
+///   `"completed"` → [`Request::Announce`]
 /// - `action: "announce"`, `event: "stopped"` → [`Request::Stop`]
 /// - `action: "scrape"` → [`Request::Scrape`]
 #[derive(Clone, Copy, Debug)]

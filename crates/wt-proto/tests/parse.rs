@@ -72,12 +72,14 @@ fn event_values() {
         &format!(r#"{{{A},"event":"st~u0061rted"}}"#),
         |b, e, _, _| assert_eq!(e, AnnounceEvent::Started, "{b}"),
     );
-    // BEP 21 partial seed: a periodic announce.
-    announce(&format!(r#"{{{A},"event":"paused"}}"#), |b, e, _, _| {
-        assert_eq!(e, AnnounceEvent::None, "{b}")
-    });
+    // BEP 21 partial seed, and the reference tracker's name for a periodic announce.
+    for periodic in ["paused", "update"] {
+        announce(&format!(r#"{{{A},"event":"{periodic}"}}"#), |b, e, _, _| {
+            assert_eq!(e, AnnounceEvent::None, "{b}")
+        });
+    }
     for bad in [
-        r#""update""#,
+        r#""Update""#,
         r#""pause""#,
         r#""Paused""#,
         "null",
@@ -223,6 +225,13 @@ fn answer_with_any_value_and_no_event() {
                     "{b}: {answer}: {r:?}"
                 )
             },
+        );
+    }
+    // A periodic event is the same as none.
+    for periodic in ["paused", "update"] {
+        each(
+            &format!(r#"{{{A},"event":"{periodic}","to_peer_id":"p2","answer":{{}}}}"#),
+            |b, r| assert!(matches!(r, Ok(Message::Answer { .. })), "{b}: {r:?}"),
         );
     }
     // With an event it is an announce.

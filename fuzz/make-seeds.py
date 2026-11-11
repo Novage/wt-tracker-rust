@@ -113,11 +113,13 @@ write("protocol", "swarm", bytes([0, 5]) + frames(
     b"\xe0",
     b"\xc0",
 ))
-# BEP 21 partial seed: "paused" on every announce, the first one too.
+# Periodic announce aliases: BEP 21 partial seed ("paused" on every announce, the first one
+# too) and "update" (the reference tracker's name for event 0).
 write("protocol", "paused", bytes([0, 5]) + frames(
     b"\x00" + announce(H, "pa", 1),
     b"\x01" + announce(H, "pb", 2, event="paused", left=1024),
     b"\x01" + announce(H, "pb", 0, event="paused", left=1024),
+    b"\x00" + announce(H, "pa", 0, event="update", left=0),
 ))
 write("protocol", "multi-swarm", bytes([1, 19]) + frames(
     b"\x03" + announce(H, "pc", 1),

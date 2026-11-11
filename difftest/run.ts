@@ -128,7 +128,8 @@ function generateTrace(seed: number, opsCount: number): { seed: number; ops: Op[
       if (chance(0.08)) home.set(peer, int(conns)); // the peer_id moves to another connection
       const info_hash = pick(hashes);
       const members: [string, string][] = [["action", '"announce"'], ["info_hash", json(info_hash)], ["peer_id", json(peer)]];
-      const event = weighted<string | null>([[30, "started"], [50, null], [20, "completed"]]);
+      // "paused" and "update": periodic announces, like no event.
+      const event = weighted<string | null>([[30, "started"], [42, null], [20, "completed"], [4, "paused"], [4, "update"]]);
       if (event) members.push(["event", json(event)]);
       const left = weighted<string | null>([[70, null], [8, "0"], [4, "-0"], [4, "0.0"], [6, '"0"'], [8, "7"]]);
       if (left) members.push(["left", left]);
@@ -185,8 +186,7 @@ function generateTrace(seed: number, opsCount: number): { seed: number; ops: Op[
       const frame = pick([
         '{"action":"announce","info_hash":"h0","peer_id":"zz"',
         "[]", '"x"', "5", "{}", '{"action":"nope"}', '{"action":5}',
-        // Not "paused": a periodic announce in Rust, an error in JS (spec §8).
-        '{"action":"announce","event":"update","info_hash":"h0","peer_id":"zz"}',
+        '{"action":"announce","event":"nope","info_hash":"h0","peer_id":"zz"}',
         '{"action":"announce","event":null,"info_hash":"h0","peer_id":"zz"}',
         '{"action":"announce","info_hash":5,"peer_id":"zz"}',
         '{"action":"announce","info_hash":"h0","peer_id":5}',
