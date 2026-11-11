@@ -1,0 +1,30 @@
+# Temporary (spec §12): manual run of loadtest/autobahn-debug.sh, to find why wstest runs out of
+# memory on case 12.4.10 over ws:// on some runners. Remove with the open item.
+name: Autobahn debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: Autobahn case ID
+        default: "12.4.10"
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    name: Autobahn case over ws://, with memory samples and capture
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: loadtest/autobahn-debug.sh
+        env:
+          CASE: ${{ inputs.case }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autobahn-debug
+          path: target/autobahn-debug

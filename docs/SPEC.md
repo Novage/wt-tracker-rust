@@ -43,6 +43,7 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 | `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss, incl. compression (§9) |
 | `loadtest/aquatic.sh`, `loadtest/aquatic/` | load test against aquatic_ws in a Linux container (§14) |
 | `.github/workflows/ci.yml` | CI: the finish checklist and short fuzzing on pull requests and `main`, Autobahn on `main`, nightly long fuzzing (§9) |
+| `.github/workflows/autobahn-debug.yml`, `loadtest/autobahn-debug.sh` | temporary manual debug of the wstest out-of-memory failure (§12) |
 | `fuzz/` | cargo-fuzz targets (separate workspace, nightly); target logic in `wt-server::fuzz` / `wt-proto::fuzz` (feature `fuzzing`); seed corpus from `fuzz/make-seeds.py` (§9) |
 | `README.md`, `CHANGELOG.md`, `SECURITY.md`, `LICENSE`, `NOTICE` | overview, changes, vulnerability reporting, Apache-2.0 |
 | `rust-toolchain.toml` | Rust 1.98.1 (also `rust-version = "1.98"` in `Cargo.toml`) |
@@ -811,6 +812,14 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
   overflows (Linux). `monitoring/` has a Grafana dashboard, alert rules and a setup guide built
   on `/metrics` alone. `/origins` lists the open connections per website (`Origin`), to see
   which sites use the tracker. Open: publish the dashboard on grafana.com.
+- **Autobahn: wstest out of memory over ws:// (open, CI):** since 2026-11-03 the Autobahn job
+  fails on some runners: over ws:// the wstest client (not `ws-echo`) is killed by the kernel at
+  about 15.5 GB, always at the same cases (12.4.10, 13.3.15 / 13.4.15: 1000 compressed messages
+  of 128 KiB), while over wss:// the same cases pass in about 3 s; the same code passed on other
+  nights. Temporary manual workflow `Autobahn debug` (`loadtest/autobahn-debug.sh`): one case over
+  ws:// against `ws-echo` and against Autobahn's own `testeeserver` (an echo with
+  permessage-deflate), the client's memory every 0.5 s (6 GB limit), and the packet headers of
+  the `ws-echo` run. Remove both when the cause is known.
 - **`"event":"update"` (done, §7.1):** from 2026-11-07, production rejected 40–90 announces per
   hour as unknown events; the `event_value` / `origin` log fields (§13.8) showed `"update"` from a
   `file://` app. It is now a periodic announce in both trackers, as in the reference tracker.
