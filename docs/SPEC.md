@@ -43,7 +43,6 @@ This file describes the **implemented** behaviour. Planned work is listed only i
 | `loadtest/autobahn.sh` | Autobahn testsuite (docker) against `ws-echo`, ws and wss, incl. compression (§9) |
 | `loadtest/aquatic.sh`, `loadtest/aquatic/` | load test against aquatic_ws in a Linux container (§14) |
 | `.github/workflows/ci.yml` | CI: the finish checklist and short fuzzing on pull requests and `main`, Autobahn on `main`, nightly long fuzzing (§9) |
-| `.github/workflows/autobahn-debug.yml`, `loadtest/autobahn-debug.sh` | temporary manual debug of the wstest out-of-memory failure (§12) |
 | `fuzz/` | cargo-fuzz targets (separate workspace, nightly); target logic in `wt-server::fuzz` / `wt-proto::fuzz` (feature `fuzzing`); seed corpus from `fuzz/make-seeds.py` (§9) |
 | `README.md`, `CHANGELOG.md`, `SECURITY.md`, `LICENSE`, `NOTICE` | overview, changes, vulnerability reporting, Apache-2.0 |
 | `rust-toolchain.toml` | Rust 1.98.1 (also `rust-version = "1.98"` in `Cargo.toml`) |
@@ -456,7 +455,8 @@ Byte-identical to `JSON.stringify` of the JS tracker's message objects:
 - **Autobahn testsuite** (`loadtest/autobahn.sh`, docker image `crossbario/autobahn-testsuite`,
   fuzzing client against the `ws-echo` example over ws and wss, including the permessage-deflate
   cases 12.* / 13.*; the echo server negotiates compression and compresses every reply): no case
-  may be FAILED. The cases run per server in groups (1–7, 9–10, 12, 13); a group whose run lost a
+  may be FAILED. The cases run per server in groups (1–7, 9–10, 12.1–12.2, 12.3, 12.4, 12.5, 13.1–13.2, 13.3,
+  13.4, 13.5–13.7), one wstest process each; a group whose run lost a
   connection through Docker Desktop's `host.docker.internal` (wstest then skips the rest of the
   run), or whose container ended with an error (its status, log tail, `free -m` and the kernel's
   out-of-memory lines from `dmesg` are printed; wstest runs unbuffered, so a killed run still
@@ -815,11 +815,13 @@ Strong: one 600k-membership state split across N shards by `swarm % N`. Weak: ev
 - **Autobahn: wstest out of memory over ws:// (open, CI):** since 2026-11-03 the Autobahn job
   fails on some runners: over ws:// the wstest client (not `ws-echo`) is killed by the kernel at
   about 15.5 GB, always at the same cases (12.4.10, 13.3.15 / 13.4.15: 1000 compressed messages
-  of 128 KiB), while over wss:// the same cases pass in about 3 s; the same code passed on other
-  nights. Temporary manual workflow `Autobahn debug` (`loadtest/autobahn-debug.sh`): one case over
-  ws:// against `ws-echo` and against Autobahn's own `testeeserver` (an echo with
-  permessage-deflate), the client's memory every 0.5 s (6 GB limit), and the packet headers of
-  the `ws-echo` run. Remove both when the cause is known.
+  of 128 KiB), while over wss:// the same cases pass in about 3 s. It depends on the runner
+  machine: the same code and runner image passed and failed on the same day (2026-11-11), and the
+  retries inside a job (same machine) fail the same way. A manual debug workflow (removed in the
+  same week) found nothing wrong with `ws-echo`: 12.4.10 alone passed with 187 MiB in the client,
+  the whole 12.* group (90 cases OK) with about 2 GiB. Now: 12.* and 13.* run in smaller groups
+  (§9), and the CI log shows the runner's CPU model (`lscpu`), to see whether failures follow one
+  machine type.
 - **`"event":"update"` (done, §7.1):** from 2026-11-07, production rejected 40–90 announces per
   hour as unknown events; the `event_value` / `origin` log fields (§13.8) showed `"update"` from a
   `file://` app. It is now a periodic announce in both trackers, as in the reference tracker.

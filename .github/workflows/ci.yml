@@ -124,6 +124,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 26
+      # The machine type: wstest ran out of memory only on some runners (spec §12).
+      - run: lscpu | grep -E '^(Model name|CPU\(s\)):' && free -m | head -2
       - run: loadtest/autobahn.sh
       - if: always()
         uses: actions/upload-artifact@v4

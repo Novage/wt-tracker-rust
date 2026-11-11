@@ -17,7 +17,11 @@ TLS_PORT=${TLS_PORT:-19443}
 IMAGE=${IMAGE:-crossbario/autobahn-testsuite}
 PLATFORM=${PLATFORM:-linux/amd64}
 ATTEMPTS=${ATTEMPTS:-3}
-CASE_GROUPS=('"1.*","2.*","3.*","4.*","5.*","6.*","7.*"' '"9.*","10.*"' '"12.*"' '"13.*"')
+# 12.* and 13.* in smaller groups: one wstest process per group, and on some CI runners wstest
+# ran out of memory late in a whole 12.* / 13.* run (spec §12).
+CASE_GROUPS=('"1.*","2.*","3.*","4.*","5.*","6.*","7.*"' '"9.*","10.*"'
+  '"12.1.*","12.2.*"' '"12.3.*"' '"12.4.*"' '"12.5.*"'
+  '"13.1.*","13.2.*"' '"13.3.*"' '"13.4.*"' '"13.5.*","13.6.*","13.7.*"')
 SERVERS=("wt-native|ws://host.docker.internal:$PORT" "wt-native-tls|wss://host.docker.internal:$TLS_PORT")
 
 mkdir -p "$OUT"
