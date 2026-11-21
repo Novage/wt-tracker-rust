@@ -23,7 +23,9 @@ A multi-core [WebTorrent](https://webtorrent.io/) tracker in Rust: a port of
   for the JS tracker.
 
 **Status:** in production since October 2026 at `wss://tracker.novage.com.ua` (Oracle Cloud
-Ampere A1, 2 cores, Always Free). Development continues; open items are listed in
+Ampere A1, 2 cores, Always Free). How it was ported and how it runs for free:
+[100k P2P Video Peers on the Oracle Cloud Always Free Tier](https://novage.com.ua/blog/100k-p2p-video-peers-on-the-oracle-cloud-always-free-tier).
+Development continues; open items are listed in
 [§12 of the specification](docs/SPEC.md#12-open-items).
 
 ## Performance
