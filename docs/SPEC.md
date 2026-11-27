@@ -1057,7 +1057,11 @@ private listener (`/swarms`, §13.7).
   connects are refused), and every WebSocket gets a close frame with **1001** (Going Away) after
   the messages already queued for it, then TLS `close_notify` and TCP shutdown (each within the
   1 s close timeout of §13.2); its peers are removed. A connection that upgrades or moves to a
-  worker during the shutdown is closed the same way at once. A worker stops when it has no
+  worker during the shutdown is closed the same way at once. Every close the server starts this
+  way (1001 here, 1008 for a message rejected on another worker, §13.3) is queued after the
+  connection's messages: the driver writes the whole queue, batch by batch as the socket takes
+  it, up to the close request, and closes with its code (only a queue that ends without one is
+  closed with 1000). A worker stops when it has no
   WebSocket left or at the deadline (`shutdownTimeout` seconds; 0 = do not wait); connections
   still open then (and HTTP requests in progress) are dropped.
 - `Server::shutdown` / dropping the `Server`: stop at once (in-process use, tests).

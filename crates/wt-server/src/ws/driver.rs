@@ -949,12 +949,18 @@ async fn drive<E: Endpoint>(
     let ping_every = idle / 2;
     let mut next_ping = Instant::now() + ping_every;
     let mut want_write = !conn.out.is_empty();
+    // `stop()` was notified: the close request is at the end of the endpoint queue.
+    let mut stopping = false;
     let end = loop {
         if want_write || conn.io.has_pending_out() {
             match conn.try_flush() {
                 Ok(done) => want_write = !done,
                 Err(_) => break End::Close(None, CloseReason::SocketError),
             }
+        }
+        if !want_write && stopping && conn.closing.is_none() {
+            // The queue is written and held no close request: close normally.
+            conn.closing = Some(close::NORMAL);
         }
         if !want_write && let Some(code) = conn.closing {
             break End::Close(Some(code), CloseReason::from_code(code));
@@ -967,11 +973,11 @@ async fn drive<E: Endpoint>(
         tokio::select! {
             biased;
             _ = ep.stop().notified() => {
-                // The queue ends with the close request: write it all, then close.
-                conn.refill();
-                if conn.closing.is_none() {
-                    conn.closing = Some(close::NORMAL);
-                }
+                // The queue ends with the close request: write it all, then close with its
+                // code. `try_flush` takes it from the queue batch by batch; a single `refill`
+                // here could stop before the close (a full batch, a blocked socket), and the
+                // frames after the batch would be lost.
+                stopping = true;
                 want_write = true;
             }
             _ = ep.wake().notified(), if !want_write => want_write = true,
