@@ -56,6 +56,68 @@ async fn graceful_shutdown_closes_every_connection_with_going_away() {
     assert_listener_closed(addr).await;
 }
 
+/// A client that is behind on reads still gets every message queued for it before the close,
+/// and the close says 1001. The socket is blocked and the driver holds a full write batch when
+/// the shutdown starts, and the rest of the queue is longer than a batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_reader_gets_its_whole_queue_then_going_away() {
+    let _serial = SERIAL.lock().await;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const ANSWERS: usize = 256;
+    let server = start(
+        r#"{"servers":[{"server":{"host":"127.0.0.1","port":0}}],"workers":1,"maxBackpressure":67108864}"#,
+    );
+    // A small receive window, so the server's socket blocks long before the queue is written.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    let tcp = socket.connect(server.local_addrs()[0]).await.unwrap();
+    let mut slow = Raw { tcp };
+    let mut hello = HANDSHAKE.as_bytes().to_vec();
+    hello.extend_from_slice(&frame(true, 1, announce(H, "pa", 0).as_bytes()));
+    slow.tcp.write_all(&hello).await.unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(slow.tcp.read_u8().await.unwrap());
+    }
+    assert!(head.starts_with(b"HTTP/1.1 101"));
+    assert_eq!(slow.read_text().await.unwrap(), reply(H, 0, 1));
+
+    let mut fast = connect(&server).await;
+    send(&mut fast, &announce(H, "pb", 0)).await;
+    assert_eq!(recv(&mut fast).await.unwrap(), reply(H, 0, 2));
+    let sdp = "x".repeat(32 * 1024);
+    for i in 0..ANSWERS {
+        send(
+            &mut fast,
+            &format!(
+                r#"{{"action":"announce","info_hash":"{H}","peer_id":"pb","to_peer_id":"pa","answer":{{"type":"answer","sdp":"{sdp}"}},"offer_id":"o{i}"}}"#
+            ),
+        )
+        .await;
+    }
+    // Answered after the answers above were routed (one worker, in order).
+    send(&mut fast, &announce(H, "pb", 0)).await;
+    assert_eq!(recv(&mut fast).await.unwrap(), reply(H, 0, 2));
+
+    let shutdown =
+        tokio::task::spawn_blocking(move || server.shutdown_gracefully(Duration::from_secs(5)));
+    let mut answers = 0;
+    let close = loop {
+        match slow.read_frame().await {
+            Some((1, text)) => {
+                assert!(text.windows(9).any(|w| w == b"\"answer\":"));
+                answers += 1;
+            }
+            Some((8, payload)) => break u16::from_be_bytes([payload[0], payload[1]]),
+            Some(_) => {}
+            None => panic!("no close frame after {answers} answers"),
+        }
+    };
+    assert_eq!((answers, close), (ANSWERS, 1001));
+    shutdown.await.unwrap();
+}
+
 /// Nothing accepts on `addr` any more. The port is free after the shutdown, so a connect can
 /// still succeed without a server: the kernel may give the client socket that same port as its
 /// source port (a TCP self-connect). That counts as closed.

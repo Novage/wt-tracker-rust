@@ -106,6 +106,11 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
+- A close the server starts (graceful shutdown 1001, a rejected message 1008 from another
+  worker) lost the messages queued after the first write batch (64 frames) and was sent as
+  1000, counted as `server_close`, when the client was behind on reads: the driver took one
+  batch from the queue and, not seeing the close request in it, closed with 1000 after that
+  batch. It now writes the whole queue up to the close request and closes with its code.
 - One message without `info_hash` (`{"action":"scrape"}`) made a worker stop for seconds and,
   after it, grow its memory by gigabytes (production: 3.2 → 6.9 GiB on 2026-10-24). A scrape
   without `info_hash` now gets no reply (as aquatic_ws; the JS tracker replies with every swarm),
