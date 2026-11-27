@@ -454,3 +454,30 @@ async fn backpressure_drops_messages_for_a_client_that_does_not_read() {
             .starts_with(r#"{"action":"scrape""#)
     );
 }
+
+/// A request head may carry as many header lines as uWebSockets accepts (spec §13.2). Behind a
+/// CDN and a reverse proxy a browser upgrade already has 20–30; with a parser sized for 32 the
+/// rest were dropped without a response.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_with_many_header_lines_is_served() {
+    let server = plain(1);
+    let extra: String = (0..60).map(|i| format!("X-Extra-{i}: v\r\n")).collect();
+
+    let (status, _, _) = http_get_with(server.local_addrs()[0], "/stats.json", &extra).await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+
+    let handshake = HANDSHAKE.replacen("\r\n\r\n", &format!("\r\n{extra}\r\n"), 1);
+    let mut tcp = tokio::net::TcpStream::connect(server.local_addrs()[0])
+        .await
+        .unwrap();
+    tcp.write_all(handshake.as_bytes()).await.unwrap();
+    let mut response = [0u8; 12];
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::io::AsyncReadExt::read_exact(&mut tcp, &mut response),
+    )
+    .await
+    .expect("no response")
+    .expect("closed without a response");
+    assert_eq!(&response, b"HTTP/1.1 101");
+}

@@ -106,6 +106,13 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
+- A request head with more than 32 header lines was dropped without a response (counted as
+  `bad_request`): the parser had room for 32. A browser upgrade behind a CDN and a reverse proxy
+  already carries 20–30 lines (client hints, cookies, `CF-*`, `X-Forwarded-*`,
+  `X-Requested-With` from Android WebViews), so a few more kept such a client off the tracker
+  for good, silently. The limit is now 100, as in uWebSockets. Seen in production: 31
+  `bad_request` closes in 32 h behind Cloudflare and nginx.
+
 - One message without `info_hash` (`{"action":"scrape"}`) made a worker stop for seconds and,
   after it, grow its memory by gigabytes (production: 3.2 → 6.9 GiB on 2026-10-24). A scrape
   without `info_hash` now gets no reply (as aquatic_ws; the JS tracker replies with every swarm),

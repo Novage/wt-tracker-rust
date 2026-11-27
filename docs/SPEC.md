@@ -872,8 +872,8 @@ Unknown fields are ignored. Invalid config (wrong types, both origin lists, half
 
 ### 13.2 Connections and HTTP
 
-- TCP (`TCP_NODELAY`) → optional TLS handshake → one HTTP/1.1 request head (≤ 8 KiB; TLS +
-  head within 10 s). The 8 KiB bound is on plaintext: over TLS each read may take ciphertext up
+- TCP (`TCP_NODELAY`) → optional TLS handshake → one HTTP/1.1 request head (≤ 8 KiB and ≤ 100
+  header lines, uWebSockets' `UWS_HTTP_MAX_HEADERS_COUNT`; TLS + head within 10 s). The 8 KiB bound is on plaintext: over TLS each read may take ciphertext up
   to one full record (`MAX_TLS_RECORD`, 5 + 16 KiB + 2 KiB) beyond what is pending, so a record
   larger than the bound always completes; and every pass of the head loop counts against the
   task's tokio budget (`consume_budget`), because `readable()` on a ready socket does not yield.
