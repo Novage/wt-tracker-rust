@@ -12,6 +12,10 @@ use crate::ws::deflate::{self, Negotiated};
 /// Request heads larger than this are rejected.
 const MAX_HEAD: usize = 8 * 1024;
 
+/// Header lines a request head may carry: uWebSockets' `UWS_HTTP_MAX_HEADERS_COUNT`, the JS
+/// tracker's. A browser upgrade behind a CDN and a reverse proxy already carries 20–30 lines.
+const MAX_HEADERS: usize = 100;
+
 /// What the server needs from a request head.
 #[derive(Debug, Default)]
 pub struct Head {
@@ -30,7 +34,7 @@ pub struct Head {
 /// Parses a complete request head at the start of `buf`: the head and its length, or `None` if
 /// more bytes are needed. Errors on malformed or oversized heads.
 pub fn parse_head(buf: &[u8]) -> io::Result<Option<(Head, usize)>> {
-    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut request = httparse::Request::new(&mut headers);
     match request.parse(buf) {
         Ok(httparse::Status::Complete(len)) => {
